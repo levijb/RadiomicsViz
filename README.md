@@ -39,16 +39,95 @@ completion record.
 
 ## Installation
 
-The supported run platform is Linux x86-64 with conda available. From the repository root:
+### From source with conda (recommended)
+
+The reference workflow is validated for Linux x86-64. Conda is recommended because it
+installs the exact Python and compiled-library versions used by the reference protocol.
+
+1. Clone the repository and enter it:
+
+   ```bash
+   git clone https://github.com/levijb/RadiomicsViz.git
+   cd RadiomicsViz
+   ```
+
+2. Create and activate the pinned environment:
+
+   ```bash
+   conda env create --file environment.yml
+   conda activate radiomicviz
+   ```
+
+3. Install PyRadiomics and RadiomicsViz:
+
+   ```bash
+   python -m pip install "pyradiomics==3.0.1" --no-build-isolation --no-deps
+   python -m pip install --editable . --no-build-isolation --no-deps
+   python -m pip check
+   radiomicviz --version
+   ```
+
+PyRadiomics is installed after environment creation so its build can use the pinned NumPy,
+setuptools and wheel already present. `--no-deps` prevents pip from replacing the versions
+fixed by `environment.yml`.
+
+### Optional setup script
+
+The repository also includes a transparent convenience wrapper for the same commands:
 
 ```bash
 bash scripts/create_environment.sh
-conda activate radiomicviz-validation-v1
+conda activate radiomicviz
 ```
 
-The script creates the pinned environment, installs PyRadiomics 3.0.1 and installs
-RadiomicsViz in editable mode. It refuses to replace an existing environment of the same
-name.
+The script creates a new environment; it does not update or replace an existing
+`radiomicviz` environment. The manual commands above are preferred when working on an HPC
+system or when you want to run each step yourself.
+
+### Pip-only installation
+
+Pip-only installation is useful for development or diagnostic runs, but it is not the
+frozen reference environment. Use Python 3.10 and ensure a C++ compiler is available
+(GCC/Clang on Linux or macOS, or MSVC on Windows):
+
+```bash
+git clone https://github.com/levijb/RadiomicsViz.git
+cd RadiomicsViz
+python -m venv .venv
+source .venv/bin/activate  # Windows PowerShell: .venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip setuptools wheel
+python -m pip install "numpy>=1.26,<2"
+python -m pip install "pyradiomics==3.0.1" --no-build-isolation --no-deps
+python -m pip install --editable .
+```
+
+RadiomicsViz is not currently distributed through PyPI, and the planned `viewer`,
+`analysis` and `all` optional dependency groups are not available in this release.
+
+### Development installation
+
+After completing either source installation above, install the test dependency and run
+the curated suite:
+
+```bash
+python -m pip install --editable ".[test]"
+python -m pytest -q
+```
+
+### Troubleshooting PyRadiomics installation
+
+This project intentionally pins PyRadiomics 3.0.1. If its build cannot import NumPy or
+other build tools, confirm the environment is active and run the commands in this order:
+
+```bash
+python -m pip install --upgrade setuptools wheel
+python -m pip install "numpy==1.26.4"
+python -m pip install "pyradiomics==3.0.1" --no-build-isolation --no-deps
+```
+
+Do not add a separate `pip install SimpleITK` step to the conda procedure:
+`environment.yml` already installs the reference SimpleITK 2.5.5 version. Installing
+SimpleITK 2.2.1 would make the run non-reference relative to this package's protocol.
 
 ## Quick start
 

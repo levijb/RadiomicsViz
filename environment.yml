@@ -1,7 +1,7 @@
 # Reproducible analysis environment for the reference 32-bin workflow.
-# PyRadiomics is installed by scripts/create_environment.sh after this file because
-# version 3.0.1 must be installed without build isolation and without dependency changes.
-name: radiomicviz-validation-v1
+# After creating this environment, install PyRadiomics 3.0.1 with
+# --no-build-isolation --no-deps, then install this package. See README.md.
+name: radiomicviz
 channels:
   - conda-forge
   - nodefaults
