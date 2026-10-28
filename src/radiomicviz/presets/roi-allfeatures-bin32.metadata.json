@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "preset_id": "roi-allfeatures-bin32",
+  "variant": "b32",
+  "status": "reference-verified",
+  "parameter_file": "roi-allfeatures-bin32.yaml",
+  "parameter_sha256": "cd2f3e1da1028daaec55b5573b7e2d986b7f34302617452103724d94ff0f942b",
+  "requires_preprocessed_input": true,
+  "bin_count": 32,
+  "expected_feature_count": 1834,
+  "expected_shape_feature_count": 14,
+  "expected_diagnostics_count": 37,
+  "expected_feature_schema_sha256": "f4ea6da5d5191bfb24ad81f05cf7792d7c853294e460fcaf959621c00f02240e",
+  "source": "Frozen reference ROI parameter file selected for the validation analysis.",
+  "resampling_note": "The numeric resampledPixelSpacing value [1,1,1] configures PyRadiomics resampling with sitkBSpline. The contrary inline comment is preserved because this file is byte-identical to the reference."
+}

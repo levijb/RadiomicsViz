@@ -1,0 +1,14 @@
+schema_version: 1
+protocol_id: lesion-habitat-v1
+protocol_version: 1.0.0
+status: reference-verified
+software:
+  python: 3.10.10
+  pyradiomics: 3.0.1
+  numpy: 1.26.4
+  simpleitk: 2.5.5
+  pywavelets: 1.8.0
+variants:
+  b32:
+    status: reference-verified
+    roi_preset_metadata: roi-allfeatures-bin32.metadata.json

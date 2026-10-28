@@ -1,0 +1,120 @@
+# =============================================================================
+# RadiomicsViz project configuration (project.yaml)
+# =============================================================================
+#
+# This file tells RadiomicsViz where your analysis-ready images and region masks are,
+# and how to read subject, session and region identifiers from their paths.
+# It holds no scientific settings; those come from the built-in protocol.
+#
+# RadiomicsViz does not preprocess images. Every image matched below must
+# already have completed the study's preprocessing, be co-registered with its
+# region masks, and be ready for radiomics. PyRadiomics may still apply the
+# transformations explicitly configured in its frozen parameter preset.
+#
+# Edit the values below to match your data. Keep every key, and set a key to
+# null only where its comment allows it. Unknown keys are rejected, so a
+# misspelled key is reported instead of silently ignored.
+#
+# Paths
+#   - Use forward slashes (/) on every operating system.
+#   - data_root and output_root may be absolute, or relative to the folder
+#     that contains this file.
+#   - Pattern keys (*_pattern) are relative to data_root. They may use the
+#     glob wildcards *, ? and [...] and the placeholders {subject} and
+#     {session}, which stand for the subject and session folder names found
+#     by the "subjects" and "sessions" sections below.
+#
+# Identifiers
+#   Subject, session, region, modality and space identifiers may contain only
+#   letters, digits, "_", "." and "-".
+#   Identifier rules (id_regex) are Python regular expressions with a named
+#   group, for example (?P<subject>...). Write them in single quotes so YAML
+#   keeps backslashes exactly as typed.
+# -----------------------------------------------------------------------------
+
+# Version of this file's layout. Leave at 1.
+schema_version: 1
+
+# Folder that contains the subject folders.
+data_root: /path/to/data
+
+# Folder where RadiomicsViz writes everything it produces. Files under
+# data_root are never modified.
+output_root: /path/to/radiomicsviz_output
+
+# -----------------------------------------------------------------------------
+# Subjects
+# -----------------------------------------------------------------------------
+subjects:
+  # Glob, relative to data_root, matching one folder per subject.
+  discovery_pattern: 'sub-*'
+  # Applied to each matched folder name. The text captured by the group
+  # "subject" becomes subject_id. This example accepts names such as sub-001
+  # and uses the whole folder name as the identifier.
+  id_regex: '^(?P<subject>sub-[A-Za-z0-9]+)$'
+
+# -----------------------------------------------------------------------------
+# Sessions
+# -----------------------------------------------------------------------------
+sessions:
+  # single:     one session per subject. Every session is recorded with the
+  #             identifier in default_session_id.
+  # discovered: session folders inside each subject folder are found with
+  #             discovery_pattern and named by the group "session" of
+  #             id_regex. Every pattern below must then contain {session}.
+  mode: single
+  # Session identifier when mode is single. Must be null when mode is
+  # discovered.
+  default_session_id: ses-01
+  # Glob, relative to each subject folder, matching one folder per session.
+  # Used only when mode is discovered; must be null when mode is single.
+  discovery_pattern: null
+  # Applied to each matched session folder name; must define the group
+  # "session". Used only when mode is discovered; must be null when mode is
+  # single.
+  id_regex: null
+
+# -----------------------------------------------------------------------------
+# Modalities
+# -----------------------------------------------------------------------------
+# One entry per analysis-ready image type. The names (T1, FLAIR) are the
+# modality identifiers written to the manifest.
+modalities:
+  T1:
+    # Pattern for the final T1 image of one subject/session. It must match
+    # exactly one file.
+    image_pattern: '{subject}/anat/{subject}_T1w_preprocessed.nii.gz'
+  FLAIR:
+    image_pattern: '{subject}/anat/{subject}_FLAIR_preprocessed.nii.gz'
+
+# -----------------------------------------------------------------------------
+# Regions
+# -----------------------------------------------------------------------------
+regions:
+  # per_region_masks: one binary mask file per region (for example one file
+  # per lesion). This is the only mode available in this release.
+  mode: per_region_masks
+  # Kind of region, recorded in every output table.
+  region_type: lesion
+  # Pattern matching every region mask of one subject/session. Each matched
+  # file is one region.
+  mask_pattern: '{subject}/lesions/*.nii.gz'
+  # Applied to each mask file name. The text captured by the group "region"
+  # becomes region_id, which must be unique within a subject/session.
+  id_regex: '^(?P<region>lesion_[0-9]+)\.nii\.gz$'
+  # Value of the region's voxels inside each mask file.
+  label: 1
+
+# -----------------------------------------------------------------------------
+# Image space and spacing
+# -----------------------------------------------------------------------------
+# Name of the image grid shared by all images and masks of a subject/session
+# (for example the native T1 space). It is recorded in the manifest; geometry
+# is still checked, never assumed.
+space_id: native
+
+# The reference analysis expects 1.0 mm voxel spacing on every axis (within
+# 0.001 mm). Images outside that tolerance stop the manifest stage. Setting
+# this to true turns the stop into a warning and marks the run as
+# non-reference.
+allow_nonreference_spacing: false
