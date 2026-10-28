@@ -42,7 +42,6 @@ packages = ["src/radiomicviz"]
 [tool.hatch.build.targets.sdist]
 include = [
     "src/radiomicviz",
-    "scripts",
     "tests",
     "environment.yml",
     "README.md",
