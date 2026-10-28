@@ -39,9 +39,10 @@ This version starts a ground-up rewrite. It is not compatible with the 0.1 serie
   the PyRadiomics parameter preset occur during feature extraction.
 - A README quick start from `project init` through manifest creation and whole-region
   extraction.
-- A manual, step-by-step conda installation procedure, a simplified optional setup
-  wrapper and accurate pip-only/development guidance for the capabilities currently
-  shipped by the package.
+- A manual, step-by-step conda installation procedure in the README, a simplified
+  optional setup wrapper and, in `INSTALLATION_DETAILS.md`, requirements, verification,
+  troubleshooting and accurate pip-only/development guidance for the capabilities
+  currently shipped by the package.
 - Conda-managed SimpleITK 2.5.5, avoiding pip replacement failures when a cluster's conda
   configuration supplies the legacy distutils-installed SimpleITK 2.2.1 package.
 - The `editables` build helper required by Hatchling when RadiomicsViz is installed in

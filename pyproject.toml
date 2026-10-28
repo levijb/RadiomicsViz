@@ -46,6 +46,7 @@ include = [
     "tests",
     "environment.yml",
     "README.md",
+    "INSTALLATION_DETAILS.md",
     "CHANGELOG.md",
 ]
 

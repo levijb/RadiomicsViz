@@ -71,87 +71,8 @@ PyRadiomics is installed after environment creation so its build can use the pin
 setuptools and wheel already present. `--no-deps` prevents pip from replacing the versions
 fixed by `environment.yml`.
 
-### Optional setup script
-
-The repository also includes a transparent convenience wrapper for the same commands:
-
-```bash
-bash scripts/create_environment.sh
-conda activate radiomicviz
-```
-
-The script creates a new environment; it does not update or replace an existing
-`radiomicviz` environment. The manual commands above are preferred when working on an HPC
-system or when you want to run each step yourself.
-
-### Pip-only installation
-
-Pip-only installation is useful for development or diagnostic runs, but it is not the
-frozen reference environment. Use Python 3.10 and ensure a C++ compiler is available
-(GCC/Clang on Linux or macOS, or MSVC on Windows):
-
-```bash
-git clone https://github.com/levijb/RadiomicsViz.git
-cd RadiomicsViz
-python -m venv .venv
-source .venv/bin/activate  # Windows PowerShell: .venv\Scripts\Activate.ps1
-python -m pip install --upgrade pip setuptools wheel
-python -m pip install "numpy>=1.26,<2"
-python -m pip install "pyradiomics==3.0.1" --no-build-isolation --no-deps
-python -m pip install --editable .
-```
-
-RadiomicsViz is not currently distributed through PyPI, and the planned `viewer`,
-`analysis` and `all` optional dependency groups are not available in this release.
-
-### Development installation
-
-After completing either source installation above, install the test dependency and run
-the curated suite:
-
-```bash
-python -m pip install --editable ".[test]"
-python -m pytest -q
-```
-
-### Troubleshooting installation
-
-If environment creation stops with `Cannot uninstall SimpleITK 2.2.1`, the failed
-environment is incomplete and should not be used. Pull the corrected environment file,
-remove the partial environment and recreate it:
-
-```bash
-conda deactivate
-conda env remove --name radiomicviz --yes
-git pull --ff-only
-conda env create --file environment.yml
-conda activate radiomicviz
-```
-
-The environment file installs SimpleITK 2.5.5 through conda, which avoids asking pip to
-overwrite a legacy distutils installation. After recreation, continue with step 3 above.
-
-If editable package installation reports `No module named 'editables'`, install the
-pinned editable-build helper and retry. Current versions of `environment.yml` install it
-automatically:
-
-```bash
-python -m pip install "editables==0.6"
-python -m pip install --editable . --no-build-isolation --no-deps
-hash -r
-```
-
-This project intentionally pins PyRadiomics 3.0.1. If its build cannot import NumPy or
-other build tools, confirm the environment is active and run the commands in this order:
-
-```bash
-python -m pip install --upgrade setuptools wheel
-python -m pip install "numpy==1.26.4"
-python -m pip install "pyradiomics==3.0.1" --no-build-isolation --no-deps
-```
-
-Do not add a separate `pip install SimpleITK` step to the conda procedure. Installing
-SimpleITK 2.2.1 would make the run non-reference relative to this package's protocol.
+For recovery steps, troubleshooting and further details, see
+[INSTALLATION_DETAILS.md](INSTALLATION_DETAILS.md).
 
 ## Quick start
 
