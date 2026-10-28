@@ -335,10 +335,23 @@ one-voxel kernel padding. They are written beneath:
 <output_root>/subjects/<subject>/sessions/<session>/regions/<region>/radiomics/voxelwise/b32/<modality>/
 ```
 
-The preset requires at least 10 lesion voxels. Smaller regions receive a hash-checked
-`skipped` completion record and a QC warning, so they remain visible without causing the
-entire command to fail. Extraction exceptions, wrong map schemas, unreadable maps, wrong
-geometry, non-float64 maps and maps without any finite values are recorded as failures.
+The preset sets PyRadiomics `minimumROISize` to 10. PyRadiomics applies this threshold
+strictly, so voxelwise extraction requires more than 10 lesion voxels. Regions with 10 or
+fewer voxels receive a hash-checked `skipped` completion record and a QC warning, so they
+remain visible without causing the entire command to fail. This voxelwise rule does not
+change the package-wide 10-voxel materialization threshold or whole-region extraction.
+
+PyRadiomics 3.0.1 can produce an entirely non-finite
+`original_glcm_JointAverage` voxel map for thin or small lesions because its symmetric
+GLCM calculation combines directional values with a regular mean. RadiomicsViz retains
+that map, completes the unit, and records a targeted QC warning; all other maps are still
+validated normally. For a symmetric GLCM, finite JointAverage values equal
+`SumAverage / 2`, so no value is imputed or substituted. A completely non-finite map with
+any other name remains an extraction failure. New completion records include finite-voxel
+counts for every map; older valid completion records remain resumable.
+
+Extraction exceptions, wrong map schemas, unreadable maps, wrong geometry and
+non-float64 maps are also recorded as failures.
 
 Invocation reports are written to:
 

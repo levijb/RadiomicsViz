@@ -45,6 +45,12 @@ class FeatureExtractor(TypingProtocol):
 
 ExtractorFactory = Callable[[Path], FeatureExtractor]
 
+# PyRadiomics 3.0.1 computes voxelwise JointAverage with a regular mean across
+# GLCM angles. A lesion kernel missing a valid pair in any angle can therefore
+# produce an entirely non-finite map even though the other protocol maps are
+# usable. Keep this exception deliberately narrow and visible in QC.
+_KNOWN_EMPTY_MAPS = frozenset({"original_glcm_JointAverage"})
+
 
 @dataclass(frozen=True)
 class _ProcessedUnit:
@@ -118,8 +124,9 @@ def run_voxelwise(
 
     Every unit receives its own extractor. Real concurrent extraction uses separate
     processes because PyRadiomics parameter validation has process-global state.
-    Regions below the preset's minimum ROI size receive a resumable ``skipped``
-    completion record and a QC warning rather than failing the invocation.
+    Regions at or below the preset's minimum ROI size receive a resumable
+    ``skipped`` completion record and a QC warning rather than failing inside
+    PyRadiomics, which requires a size strictly greater than ``minimumROISize``.
     """
     if jobs < 1:
         raise VoxelwiseStageError("jobs must be at least 1")
@@ -319,7 +326,7 @@ def _extract_unit(
     log = [f"[{unit.unit_key}] extraction started"]
     try:
         mask_voxels = _mask_voxel_count(unit)
-        if mask_voxels < preset.minimum_roi_size:
+        if mask_voxels <= preset.minimum_roi_size:
             return _commit_skip(
                 unit,
                 plan,
@@ -350,11 +357,30 @@ def _extract_unit(
         _validate_map_schema(unit, maps, vector, preset, checks)
         expected_geometry = _expected_map_geometry(unit, preset.kernel_radius)
         output_fingerprints: dict[str, dict[str, object]] = {}
+        map_finite_voxels: dict[str, int] = {}
+        known_empty_maps: list[str] = []
         for name in preset.expected_map_names:
             target = work_dir / f"{name}.nrrd"
-            _write_and_validate_map(
+            finite_voxels = _write_and_validate_map(
                 unit, name, maps[name], target, expected_geometry
             )
+            map_finite_voxels[name] = finite_voxels
+            if finite_voxels == 0:
+                known_empty_maps.append(name)
+                checks.append(
+                    _check(
+                        unit,
+                        "voxelwise_map_empty",
+                        "WARN",
+                        measured=f"0 finite of {mask_voxels} lesion voxels",
+                        threshold="at least 1 finite voxel",
+                        message=(
+                            f"{name} is entirely non-finite; retained because this is "
+                            "the known PyRadiomics voxelwise JointAverage behavior"
+                        ),
+                        path=final_dir / target.name,
+                    )
+                )
             output_fingerprints[name] = _fingerprint(
                 target, recorded_path=final_dir / target.name
             )
@@ -363,8 +389,14 @@ def _extract_unit(
                 unit,
                 "voxelwise_maps",
                 "PASS",
-                measured=f"{len(output_fingerprints)} readable float64 NRRDs",
-                threshold=f"{preset.expected_map_count} maps with expected geometry and finite voxels",
+                measured=(
+                    f"{len(output_fingerprints)} readable float64 NRRDs; "
+                    f"known empty maps={known_empty_maps}"
+                ),
+                threshold=(
+                    f"{preset.expected_map_count} maps with expected geometry; only "
+                    "original_glcm_JointAverage may be entirely non-finite"
+                ),
                 message="voxelwise feature maps passed output validation",
                 path=final_dir,
             )
@@ -387,6 +419,7 @@ def _extract_unit(
                 "map_count": len(output_fingerprints),
                 "map_names": list(preset.expected_map_names),
                 "map_schema_sha256": preset.expected_map_schema_sha256,
+                "map_finite_voxels": map_finite_voxels,
                 "outputs": output_fingerprints,
             }
         )
@@ -455,8 +488,8 @@ def _commit_skip(
     log: list[str],
 ) -> _ProcessedUnit:
     reason = (
-        f"region has {mask_voxels} voxels; voxelwise preset requires at least "
-        f"{preset.minimum_roi_size}"
+        f"region has {mask_voxels} voxels; PyRadiomics voxelwise extraction "
+        f"requires strictly more than minimumROISize={preset.minimum_roi_size}"
     )
     checks.append(
         _check(
@@ -464,7 +497,7 @@ def _commit_skip(
             "voxelwise_minimum_roi_size",
             "WARN",
             measured=str(mask_voxels),
-            threshold=f">={preset.minimum_roi_size}",
+            threshold=f">{preset.minimum_roi_size}",
             message=reason,
             path=unit.mask_path,
         )
@@ -487,6 +520,7 @@ def _commit_skip(
             "map_count": 0,
             "map_names": [],
             "map_schema_sha256": preset.expected_map_schema_sha256,
+            "map_finite_voxels": {},
             "outputs": {},
         }
     )
@@ -520,27 +554,47 @@ def _resume_unit(
     skipped = data.get("status") == "skipped"
     names = tuple(data.get("map_names", ()))
     status = "resumed-skipped" if skipped else "resumed"
-    check = _check(
-        unit,
-        "voxelwise_resume",
-        "WARN" if skipped else "PASS",
-        measured=(
-            f"skipped at {data.get('mask_voxels')} voxels"
-            if skipped
-            else f"{len(names)} maps"
-        ),
-        threshold=(
-            f">={preset.minimum_roi_size} voxels"
-            if skipped
-            else f"{preset.expected_map_count} maps"
-        ),
-        message=(
-            str(data.get("skip_reason", "matching skipped unit was reused"))
-            if skipped
-            else "matching completed unit was reused"
-        ),
-        path=completion_path,
-    )
+    checks = [
+        _check(
+            unit,
+            "voxelwise_resume",
+            "WARN" if skipped else "PASS",
+            measured=(
+                f"skipped at {data.get('mask_voxels')} voxels"
+                if skipped
+                else f"{len(names)} maps"
+            ),
+            threshold=(
+                f">{preset.minimum_roi_size} voxels"
+                if skipped
+                else f"{preset.expected_map_count} maps"
+            ),
+            message=(
+                str(data.get("skip_reason", "matching skipped unit was reused"))
+                if skipped
+                else "matching completed unit was reused"
+            ),
+            path=completion_path,
+        )
+    ]
+    finite_voxels = data.get("map_finite_voxels")
+    if not skipped and isinstance(finite_voxels, Mapping):
+        for name in sorted(_KNOWN_EMPTY_MAPS):
+            if finite_voxels.get(name) == 0:
+                checks.append(
+                    _check(
+                        unit,
+                        "voxelwise_map_empty",
+                        "WARN",
+                        measured=f"0 finite of {data.get('mask_voxels')} lesion voxels",
+                        threshold="at least 1 finite voxel",
+                        message=(
+                            f"{name} is entirely non-finite; retained because this is "
+                            "the known PyRadiomics voxelwise JointAverage behavior"
+                        ),
+                        path=output_dir / f"{name}.nrrd",
+                    )
+                )
     return _ProcessedUnit(
         result=VoxelwiseUnitResult(
             unit_key=unit.unit_key,
@@ -551,7 +605,7 @@ def _resume_unit(
             map_names=names,
             message=str(data.get("skip_reason", "")),
         ),
-        checks=(check,),
+        checks=tuple(checks),
         failure=None,
         log_lines=(f"[{unit.unit_key}] matching result resumed",),
     )
@@ -646,7 +700,7 @@ def _write_and_validate_map(
     image: sitk.Image,
     target: Path,
     expected_geometry: tuple[tuple[int, ...], tuple[float, ...], tuple[float, ...], tuple[float, ...]],
-) -> None:
+) -> int:
     sitk.WriteImage(image, str(target))
     if not target.is_file() or target.stat().st_size == 0:
         raise VoxelwiseStageError(f"empty feature map written for {name}")
@@ -667,8 +721,12 @@ def _write_and_validate_map(
             f"feature map {name} geometry does not equal the padded region crop"
         )
     values = sitk.GetArrayViewFromImage(saved)
-    if values.size == 0 or not np.isfinite(values).any():
+    if values.size == 0:
+        raise VoxelwiseStageError(f"feature map {name} contains no voxels")
+    finite_voxels = int(np.count_nonzero(np.isfinite(values)))
+    if finite_voxels == 0 and name not in _KNOWN_EMPTY_MAPS:
         raise VoxelwiseStageError(f"feature map {name} contains no finite voxels")
+    return finite_voxels
 
 
 def _expected_map_geometry(
@@ -731,7 +789,7 @@ def _completion_matches(
     if status == "skipped":
         return (
             isinstance(data.get("mask_voxels"), int)
-            and data["mask_voxels"] < preset.minimum_roi_size
+            and data["mask_voxels"] <= preset.minimum_roi_size
             and data.get("map_count") == 0
             and data.get("map_names") == []
             and data.get("outputs") == {}

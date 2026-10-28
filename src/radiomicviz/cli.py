@@ -419,8 +419,9 @@ def voxelwise_command(
     """Extract reference voxelwise PyRadiomics feature maps.
 
     Every manifest region and modality is one resumable unit. Successful units contain
-    one float64 NRRD per protocol feature. Regions below the preset's minimum ROI size
-    are recorded as expected skips rather than silently disappearing.
+    one float64 NRRD per protocol feature. Regions at or below the preset's minimum ROI
+    size (``minimumROISize``) are recorded as expected skips because PyRadiomics requires
+    the voxel count to be strictly greater than that setting.
     """
     try:
         plan = load_voxelwise_plan(manifest_path)
@@ -472,7 +473,7 @@ def voxelwise_command(
 
     click.echo(f"  completed: {result.succeeded}")
     click.echo(f"  resumed: {result.resumed}")
-    click.echo(f"  skipped (< minimum ROI size): {result.skipped}")
+    click.echo(f"  skipped (ROI <= minimumROISize): {result.skipped}")
     click.echo(f"  failed: {result.failed}")
     click.echo(f"  warnings: {result.warnings}")
     click.echo(f"  QC: {result.checks_path}")

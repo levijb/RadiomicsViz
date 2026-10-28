@@ -15,8 +15,13 @@ This version starts a ground-up rewrite. It is not compatible with the 0.1 serie
 - Reference 32-bin voxelwise radiomics using the authenticated validation parameter file,
   manifest-driven region/modality units, 92 float64 NRRD feature maps, exact map-schema
   validation, concurrent local execution, per-unit resume and replacement, QC, errors and
-  provenance. Regions below the preset's 10-voxel minimum are retained as explicit,
-  resumable skips rather than failing the invocation or silently disappearing.
+  provenance. Because PyRadiomics requires an ROI strictly larger than its configured
+  `minimumROISize`, regions with 10 or fewer voxels are retained as explicit, resumable
+  voxelwise skips rather than failing the invocation or silently disappearing.
+- Targeted handling of the known PyRadiomics voxelwise
+  `original_glcm_JointAverage` all-nonfinite result: the map is retained with a concise QC
+  warning instead of discarding the other 91 valid maps. New completion records include
+  per-map finite-voxel counts while existing valid records remain resumable.
 - Reference 32-bin whole-region radiomics with an immutable PyRadiomics preset,
   minimal built-in protocol, concurrent local execution, per-unit resume and
   replacement, cohort exports, QC, errors and provenance.

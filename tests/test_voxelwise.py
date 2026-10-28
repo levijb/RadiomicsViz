@@ -17,7 +17,12 @@ from radiomicviz.manifest import build_manifest_preview, write_manifest_outputs
 from radiomicviz.protocols import load_protocol
 from radiomicviz.voxelwise import load_voxelwise_plan, run_voxelwise
 
-MAP_NAMES = ("original_firstorder_Mean", "original_glcm_Contrast")
+JOINT_AVERAGE = "original_glcm_JointAverage"
+MAP_NAMES = (
+    "original_firstorder_Mean",
+    JOINT_AVERAGE,
+    "original_glcm_Contrast",
+)
 FAKE_SOFTWARE = {
     "python": "3.10.10",
     "pyradiomics": "3.0.1",
@@ -45,14 +50,35 @@ def _write_mask(path: Path, block) -> None:
     sitk.WriteImage(image, str(path))
 
 
-def _case(tmp_path: Path, *, tiny_second: bool = False):
+def _write_count_mask(path: Path, voxel_count: int) -> None:
+    """Write a compact 3-D mask with exactly 1-12 foreground voxels."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    array = np.zeros((9, 9, 9), dtype=np.uint8)
+    coordinates = np.argwhere(np.ones((3, 2, 2), dtype=bool))[:voxel_count]
+    coordinates += np.asarray((4, 4, 4))
+    array[tuple(coordinates.T)] = 1
+    image = sitk.GetImageFromArray(array)
+    image.SetSpacing((1.0, 1.0, 1.0))
+    sitk.WriteImage(image, str(path))
+
+
+def _case(
+    tmp_path: Path,
+    *,
+    tiny_second: bool = False,
+    second_voxel_count: int | None = None,
+):
     data_root = tmp_path / "data"
     subject = data_root / "sub-001"
     _write_image(subject / "anat" / "sub-001_T1w_preprocessed.nii.gz")
     _write_image(subject / "anat" / "sub-001_FLAIR_preprocessed.nii.gz")
     _write_mask(subject / "lesions" / "lesion_001.nii.gz", np.s_[2:5, 2:5, 2:5])
-    second = np.s_[6:7, 6:7, 6:7] if tiny_second else np.s_[4:7, 4:6, 4:6]
-    _write_mask(subject / "lesions" / "lesion_002.nii.gz", second)
+    second_path = subject / "lesions" / "lesion_002.nii.gz"
+    if second_voxel_count is not None:
+        _write_count_mask(second_path, second_voxel_count)
+    else:
+        second = np.s_[6:7, 6:7, 6:7] if tiny_second else np.s_[4:7, 4:6, 4:6]
+        _write_mask(second_path, second)
     project = yaml.safe_load(template_text("project"))
     project["data_root"] = str(data_root)
     project["output_root"] = str(tmp_path / "output")
@@ -83,8 +109,14 @@ def _test_protocol():
 
 
 class FakeExtractor:
-    def __init__(self, *, fail_mask: str | None = None):
+    def __init__(
+        self,
+        *,
+        fail_mask: str | None = None,
+        all_nan_map: str | None = None,
+    ):
         self.fail_mask = fail_mask
+        self.all_nan_map = all_nan_map
 
     def execute(
         self, image: str, mask: str, *, label: int, voxelBased: bool
@@ -109,15 +141,16 @@ class FakeExtractor:
         mask_crop = sitk.RegionOfInterest(mask_image, crop_size, lower)
         foreground = sitk.GetArrayFromImage(mask_crop) == label
 
-        def feature_map(value: float) -> sitk.Image:
+        def feature_map(value: float | None) -> sitk.Image:
             array = np.full(foreground.shape, np.nan, dtype=np.float64)
-            array[foreground] = value
+            if value is not None:
+                array[foreground] = value
             result = sitk.GetImageFromArray(array)
             result.CopyInformation(source_crop)
             return result
 
-        return OrderedDict(
-            (
+        result = OrderedDict(
+            [
                 (
                     "diagnostics_Configuration_Settings",
                     {
@@ -126,11 +159,13 @@ class FakeExtractor:
                         "label": label,
                         "resampledPixelSpacing": None,
                     },
-                ),
-                (MAP_NAMES[0], feature_map(2.5)),
-                (MAP_NAMES[1], feature_map(4.5)),
-            )
+                )
+            ]
         )
+        for index, name in enumerate(MAP_NAMES, start=1):
+            value = None if name == self.all_nan_map else index + 0.5
+            result[name] = feature_map(value)
+        return result
 
 
 def _factory(_parameter_path: Path):
@@ -192,12 +227,107 @@ def test_tiny_regions_are_recorded_skips_not_failures(tmp_path):
     assert sum(row["status"] == "WARN" for row in _rows(result.checks_path)) == 2
 
 
+def test_voxelwise_minimum_roi_size_is_strict_and_skips_resume(tmp_path):
+    ten_manifest, _ = _case(tmp_path / "ten", second_voxel_count=10)
+    ten_plan = load_voxelwise_plan(ten_manifest)
+    protocol = _test_protocol()
+    options = dict(extractor_factory=_factory, software=FAKE_SOFTWARE)
+
+    first = run_voxelwise(ten_plan, protocol, **options)
+    resumed = run_voxelwise(ten_plan, protocol, **options)
+
+    assert first.valid
+    assert (first.succeeded, first.skipped, first.failed) == (2, 2, 0)
+    exact_ten = [unit for unit in first.units if unit.mask_voxels == 10]
+    assert len(exact_ten) == 2
+    assert all(unit.status == "skipped" for unit in exact_ten)
+    assert all("strictly more than minimumROISize=10" in unit.message for unit in exact_ten)
+    assert resumed.resumed == 2
+    assert resumed.skipped == 2
+    assert sum(unit.status == "resumed-skipped" for unit in resumed.units) == 2
+
+    eleven_manifest, _ = _case(tmp_path / "eleven", second_voxel_count=11)
+    eleven = run_voxelwise(
+        load_voxelwise_plan(eleven_manifest),
+        protocol,
+        **options,
+    )
+    assert eleven.valid
+    assert (eleven.succeeded, eleven.skipped, eleven.failed) == (4, 0, 0)
+
+
+def test_all_nan_joint_average_completes_with_targeted_warning(tmp_path):
+    manifest_path, _ = _case(tmp_path)
+    plan = load_voxelwise_plan(manifest_path)
+    protocol = _test_protocol()
+    factory = lambda _path: FakeExtractor(all_nan_map=JOINT_AVERAGE)
+
+    result = run_voxelwise(
+        plan,
+        protocol,
+        extractor_factory=factory,
+        software=FAKE_SOFTWARE,
+    )
+
+    assert result.valid
+    assert (result.succeeded, result.skipped, result.failed) == (4, 0, 0)
+    warnings = [
+        row
+        for row in _rows(result.checks_path)
+        if row["check_id"] == "voxelwise_map_empty"
+    ]
+    assert len(warnings) == 4
+    assert all(row["status"] == "WARN" for row in warnings)
+    assert all(JOINT_AVERAGE in row["message"] for row in warnings)
+    for unit in result.units:
+        completion = json.loads(unit.completion_path.read_text(encoding="utf-8"))
+        assert completion["map_finite_voxels"][JOINT_AVERAGE] == 0
+        assert set(completion["map_finite_voxels"]) == set(MAP_NAMES)
+        assert (unit.output_dir / f"{JOINT_AVERAGE}.nrrd").is_file()
+
+    resumed = run_voxelwise(
+        plan,
+        protocol,
+        extractor_factory=factory,
+        software=FAKE_SOFTWARE,
+    )
+    assert resumed.valid and resumed.resumed == 4
+    resumed_warnings = [
+        row
+        for row in _rows(resumed.checks_path)
+        if row["check_id"] == "voxelwise_map_empty"
+    ]
+    assert len(resumed_warnings) == 4
+
+
+def test_all_nan_unrecognized_map_remains_a_failure(tmp_path):
+    manifest_path, _ = _case(tmp_path)
+
+    result = run_voxelwise(
+        load_voxelwise_plan(manifest_path),
+        _test_protocol(),
+        extractor_factory=lambda _path: FakeExtractor(all_nan_map=MAP_NAMES[0]),
+        software=FAKE_SOFTWARE,
+    )
+
+    assert not result.valid
+    assert (result.succeeded, result.failed) == (0, 4)
+    assert all("contains no finite voxels" in row["message"] for row in _rows(result.errors_path))
+
+
 def test_voxelwise_resumes_and_corruption_requires_force(tmp_path):
     manifest_path, _output_root = _case(tmp_path)
     plan = load_voxelwise_plan(manifest_path)
     protocol = _test_protocol()
     options = dict(extractor_factory=_factory, software=FAKE_SOFTWARE)
     first = run_voxelwise(plan, protocol, **options)
+    for unit in first.units:
+        completion = json.loads(unit.completion_path.read_text(encoding="utf-8"))
+        completion.pop("map_finite_voxels")
+        unit.completion_path.write_text(
+            json.dumps(completion, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
     resumed = run_voxelwise(plan, protocol, **options)
     corrupt_dir = first.units[0].output_dir
     (corrupt_dir / f"{MAP_NAMES[0]}.nrrd").write_bytes(b"broken")
