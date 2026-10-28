@@ -28,6 +28,7 @@ def test_project_template_loads(tmp_path):
     assert config.regions.mode == "per_region_masks"
     assert config.regions.region_type == "lesion"
     assert config.regions.label == 1
+    assert config.regions.connectivity is None
     assert config.allow_nonreference_spacing is False
 
 
@@ -130,8 +131,8 @@ PROJECT_CASES = [
         "regions.mask_pattern: must contain the placeholder {subject}",
     ),
     (
-        _set("regions", "mode", "labeled_map"),
-        "regions.mode: unsupported mode 'labeled_map'; this release supports only 'per_region_masks'",
+        _set("regions", "mode", "watershed"),
+        "regions.mode: must be one of 'per_region_masks', 'labeled_map', 'connected_components'",
     ),
     (
         _set("sessions", "mode", "multiple"),
@@ -153,6 +154,62 @@ def test_project_schema_violation(project_data, mutate, expected):
     mutate(project_data)
     errors = errors_of(parse_project_config, project_data)
     assert any(message.startswith(expected) for message in errors), errors
+
+
+def test_labeled_map_configuration(project_data):
+    project_data["regions"].update(
+        mode="labeled_map",
+        mask_pattern="{subject}/lesions/labeled.nii.gz",
+        id_regex=None,
+        label=None,
+        connectivity=None,
+    )
+    regions = parse_project_config(project_data).regions
+    assert regions.mode == "labeled_map"
+    assert regions.id_regex is None
+    assert regions.label is None
+    assert regions.connectivity is None
+
+
+def test_connected_components_configuration(project_data):
+    project_data["regions"].update(
+        mode="connected_components",
+        mask_pattern="{subject}/lesions/combined.nii.gz",
+        id_regex=None,
+        label=1,
+        connectivity=26,
+    )
+    regions = parse_project_config(project_data).regions
+    assert regions.mode == "connected_components"
+    assert regions.label == 1
+    assert regions.connectivity == 26
+
+
+@pytest.mark.parametrize("connectivity", [None, 0, 18])
+def test_connected_components_requires_explicit_supported_connectivity(
+    project_data, connectivity
+):
+    project_data["regions"].update(
+        mode="connected_components",
+        mask_pattern="{subject}/lesions/combined.nii.gz",
+        id_regex=None,
+        label=1,
+        connectivity=connectivity,
+    )
+    errors = errors_of(parse_project_config, project_data)
+    assert any(error.startswith("regions.connectivity:") for error in errors)
+
+
+def test_labeled_map_rejects_binary_mode_fields(project_data):
+    project_data["regions"].update(
+        mode="labeled_map",
+        mask_pattern="{subject}/lesions/labeled.nii.gz",
+        connectivity=26,
+    )
+    errors = errors_of(parse_project_config, project_data)
+    assert "regions.id_regex: must be null when regions.mode is 'labeled_map'" in errors
+    assert "regions.label: must be null when regions.mode is 'labeled_map'" in errors
+    assert "regions.connectivity: must be null when regions.mode is 'labeled_map'" in errors
 
 
 # Reading files ---------------------------------------------------------------

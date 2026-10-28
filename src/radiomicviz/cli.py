@@ -9,6 +9,11 @@ import click
 from radiomicviz import __version__
 from radiomicviz.config import ConfigError, load_project_config
 from radiomicviz.config.templates import write_template
+from radiomicviz.lesions import (
+    MaterializationError,
+    build_materialization_plan,
+    run_materialization,
+)
 from radiomicviz.manifest import build_manifest_preview, write_manifest_outputs
 from radiomicviz.protocols import ProtocolError, load_protocol
 from radiomicviz.whole import (
@@ -64,6 +69,82 @@ def project_init(output: Path, force: bool) -> None:
     _write("project", output, force)
 
 
+@main.group(context_settings=CONTEXT_SETTINGS)
+def lesions() -> None:
+    """Prepare lesion masks for the manifest.
+
+    Projects that already have one binary file per lesion do not use this command.
+    Combined labeled or binary masks must be materialized before the manifest stage.
+    """
+
+
+@lesions.command("materialize", context_settings=CONTEXT_SETTINGS)
+@click.option(
+    "--project",
+    "project_path",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    required=True,
+    help="Validated project.yaml using labeled_map or connected_components mode.",
+)
+@click.option(
+    "--output-root",
+    type=click.Path(file_okay=False, path_type=Path),
+    default=None,
+    help="Override project.yaml output_root for this run.",
+)
+@click.option(
+    "--dry-run",
+    is_flag=True,
+    help="Validate inputs and show planned lesion masks without writing files.",
+)
+@click.option(
+    "--force",
+    is_flag=True,
+    help="Archive and replace existing materialized masks instead of resuming them.",
+)
+def lesions_materialize(
+    project_path: Path,
+    output_root: Path | None,
+    dry_run: bool,
+    force: bool,
+) -> None:
+    """Split one combined mask per subject/session into binary lesion masks.
+
+    ``labeled_map`` preserves each positive integer label as one lesion.
+    ``connected_components`` splits a binary foreground using the connectivity stated
+    in project.yaml. Touching foreground voxels remain one lesion.
+    """
+    try:
+        project_config = load_project_config(project_path)
+        plan = build_materialization_plan(project_config, output_root=output_root)
+        result = run_materialization(plan, dry_run=dry_run, force=force)
+    except (ConfigError, MaterializationError, OSError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from None
+
+    click.echo("Lesion materialization plan" if dry_run else "Lesion materialization result")
+    click.echo(f"  mode: {plan.project.regions.mode}")
+    if plan.project.regions.connectivity is not None:
+        click.echo(f"  connectivity: {plan.project.regions.connectivity}")
+    click.echo(f"  output root: {plan.output_root}")
+    click.echo(f"  subject/session units: {len(plan.units)}")
+    for unit in result.units:
+        detail = f" ({unit.message})" if unit.message else ""
+        click.echo(
+            f"  {unit.status:<29} {unit.subject_id}/{unit.session_id}: "
+            f"{unit.n_regions} lesion(s) -> {unit.output_dir}{detail}"
+        )
+    if dry_run:
+        click.echo("Dry run: no lesion masks were written.")
+    else:
+        click.echo(f"  completed: {result.completed}")
+        click.echo(f"  resumed: {result.resumed}")
+    if not result.valid:
+        raise click.ClickException(
+            f"lesion materialization has {result.blocked} blocked and {result.failed} failed "
+            "unit(s); review the messages above"
+        )
+
+
 @main.command("manifest", context_settings=CONTEXT_SETTINGS)
 @click.option(
     "--project",
@@ -93,11 +174,11 @@ def manifest_command(
 ) -> None:
     """Discover inputs, validate them, and build regions_manifest.csv.
 
-    The first release accepts separate binary region masks only. The default is a
-    read-only preview. Review it, then repeat with --write to create the canonical
-    manifest, input checks, errors table, run metadata and one concise log. Rerun with
-    --write after adding subjects; completed radiomics units can still resume when their
-    inputs are unchanged.
+    Separate binary region masks are read directly. Combined masks must first be split
+    with ``radiomicviz lesions materialize``. The default is a read-only preview. Review
+    it, then repeat with --write to create the canonical manifest, input checks, errors
+    table, run metadata and one concise log. Rerun with --write after adding subjects;
+    completed radiomics units can still resume when their inputs are unchanged.
     """
     try:
         project_config = load_project_config(project_path)

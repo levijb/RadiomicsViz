@@ -25,6 +25,7 @@ def test_help_lists_commands(runner, flag):
     assert result.exit_code == 0
     assert "Usage: radiomicviz" in result.output
     assert re.search(r"^\s+project\s", result.output, re.MULTILINE)
+    assert re.search(r"^\s+lesions\s", result.output, re.MULTILINE)
     assert re.search(r"^\s+manifest\s", result.output, re.MULTILINE)
     assert re.search(r"^\s+whole\s", result.output, re.MULTILINE)
     assert not re.search(r"^\s+preprocess\s", result.output, re.MULTILINE)
@@ -50,7 +51,16 @@ def test_manifest_help_explains_preview_and_write(runner):
     assert "--write" in result.output
     assert ".bak-<timestamp>" in result.output
     assert "--force" not in result.output
-    assert "read-only preview" in result.output
+    assert re.search(r"read-only\s+preview", result.output)
+
+
+def test_lesion_materialization_help_exposes_safe_controls(runner):
+    result = runner.invoke(main, ["lesions", "materialize", "--help"])
+    assert result.exit_code == 0
+    assert "--project" in result.output
+    assert "--dry-run" in result.output
+    assert "--force" in result.output
+    assert "Touching foreground voxels remain one lesion" in result.output
 
 
 def test_init_help(runner):

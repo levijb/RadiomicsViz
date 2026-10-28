@@ -23,6 +23,11 @@ This version starts a ground-up rewrite. It is not compatible with the 0.1 serie
   dotted key path.
 - Deterministic discovery of subjects, sessions, modalities and separate binary region
   masks from `project.yaml`.
+- Optional lesion materialization from either an integer-labeled map or a combined
+  binary mask with explicitly configured 6- or 26-connectivity. Source masks remain
+  read-only; verified binary outputs carry per-session completion and provenance records.
+- Manifest validation of materialized-mask hashes and source hashes, preventing stale
+  lesion splits from entering radiomics extraction.
 - A canonical manifest whose `image_path` points directly to an analysis-ready image.
 - Minimal geometry, spacing, mask and overlap checks with a preview-first
   `radiomicviz manifest` command.

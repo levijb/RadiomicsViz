@@ -13,6 +13,7 @@ import SimpleITK as sitk
 
 from radiomicviz.config._common import SAFE_ID_PATTERN
 from radiomicviz.config.project import ProjectConfig
+from radiomicviz.lesions import MaterializationError, materialized_masks_for_session
 from radiomicviz.manifest.models import CheckRow, ErrorRow, ManifestPreview, ManifestRow
 
 REFERENCE_SPACING_MM = (1.0, 1.0, 1.0)
@@ -238,11 +239,43 @@ def build_manifest_preview(
 
             images[modality.name] = (image_path, image_info)
 
-        mask_matches = _match_pattern(
-            data_root, project.regions.mask_pattern, session, collect, "region_mask",
-            subject_id=session.subject_id, session_id=session.session_id,
-        )
+        if project.regions.mode == "per_region_masks":
+            mask_matches = _match_pattern(
+                data_root, project.regions.mask_pattern, session, collect, "region_mask",
+                subject_id=session.subject_id, session_id=session.session_id,
+            )
+            mask_label = project.regions.label
+        else:
+            try:
+                mask_matches = materialized_masks_for_session(
+                    project,
+                    data_root=data_root,
+                    output_root=resolved_output,
+                    subject_id=session.subject_id,
+                    subject_name=session.subject_name,
+                    session_id=session.session_id,
+                    session_name=session.session_name,
+                )
+            except MaterializationError as exc:
+                collect.fail(
+                    "lesion_materialization",
+                    "combined lesion mask has not been materialized or is stale; run "
+                    f"'radiomicviz lesions materialize --project {project.source}' ({exc})",
+                    subject_id=session.subject_id,
+                    session_id=session.session_id,
+                )
+                continue
+            mask_label = 1
         if not mask_matches:
+            if project.regions.mode != "per_region_masks":
+                collect.check(
+                    "region_masks_not_found",
+                    "WARN",
+                    subject_id=session.subject_id,
+                    session_id=session.session_id,
+                    message="combined mask materialization contains zero lesions",
+                )
+                continue
             collect.fail(
                 "region_masks_not_found", f"no region masks matched {project.regions.mask_pattern!r}",
                 subject_id=session.subject_id, session_id=session.session_id, path=str(data_root),
@@ -252,7 +285,11 @@ def build_manifest_preview(
         seen_regions: dict[str, Path] = {}
         occupancy: np.ndarray | None = None
         for mask_path in mask_matches:
-            region_id = _extract_id(project.regions.id_regex, "region", mask_path.name)
+            region_id = (
+                _extract_id(project.regions.id_regex, "region", mask_path.name)
+                if project.regions.mode == "per_region_masks"
+                else mask_path.parent.name
+            )
             region_scope = {"subject_id": session.subject_id, "session_id": session.session_id}
             if region_id is None:
                 collect.fail(
@@ -291,16 +328,16 @@ def build_manifest_preview(
                 continue
 
             unique_values = np.unique(mask_array)
-            allowed = np.array([0, project.regions.label])
+            allowed = np.array([0, mask_label])
             invalid_values = unique_values[~np.isin(unique_values, allowed)]
             if invalid_values.size:
                 collect.fail(
                     "mask_values", "mask contains values other than background 0 and the configured label",
                     path=str(mask_path), measured_value=_values_text(unique_values),
-                    threshold=f"0 and {project.regions.label}", **region_scope,
+                    threshold=f"0 and {mask_label}", **region_scope,
                 )
                 continue
-            foreground = mask_array == project.regions.label
+            foreground = mask_array == mask_label
             voxel_count = int(np.count_nonzero(foreground))
             if voxel_count == 0:
                 collect.fail(
@@ -310,7 +347,7 @@ def build_manifest_preview(
                 continue
             collect.check(
                 "mask_values", "PASS", path=str(mask_path),
-                measured_value=_values_text(unique_values), threshold=f"0 and {project.regions.label}",
+                measured_value=_values_text(unique_values), threshold=f"0 and {mask_label}",
                 message="mask values are valid", **region_scope,
             )
             size_status = "WARN" if voxel_count < 50 else "PASS"
@@ -373,7 +410,7 @@ def build_manifest_preview(
                         subject_id=session.subject_id, session_id=session.session_id,
                         region_id=region_id, region_type=project.regions.region_type,
                         modality=modality_name, image_path=str(image_path),
-                        mask_path=str(mask_path), label=project.regions.label,
+                        mask_path=str(mask_path), label=mask_label,
                         space_id=project.space_id,
                         image_size_bytes=image_stat[0], image_mtime_utc=image_stat[1],
                         mask_size_bytes=mask_stat[0], mask_mtime_utc=mask_stat[1],

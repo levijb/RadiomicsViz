@@ -19,7 +19,7 @@ from radiomicviz.config._common import Checker, load_yaml_mapping
 PROJECT_SCHEMA_VERSION = 1
 
 SESSION_MODES = ("single", "discovered")
-REGION_MODES = ("per_region_masks",)
+REGION_MODES = ("per_region_masks", "labeled_map", "connected_components")
 
 _TOP_LEVEL_KEYS = (
     "schema_version",
@@ -68,13 +68,20 @@ class ModalitySpec:
 
 @dataclass(frozen=True)
 class RegionSpec:
-    """How region masks are found and identified."""
+    """How region masks are supplied or materialized.
+
+    ``per_region_masks`` reads one existing binary file per region. ``labeled_map``
+    materializes every positive integer in one combined map. ``connected_components``
+    materializes the configured foreground value of one binary mask using explicit
+    6- or 26-connectivity.
+    """
 
     mode: str
     region_type: str
     mask_pattern: str
-    id_regex: str
-    label: int
+    id_regex: str | None
+    label: int | None
+    connectivity: int | None
 
 
 @dataclass(frozen=True)
@@ -236,15 +243,17 @@ def _parse_regions(check: Checker, value: Any, session_required: bool) -> Region
     section = check.mapping(value, "regions")
     if section is None:
         return None
-    check.keys(section, "regions", required=("mode", "region_type", "mask_pattern", "id_regex", "label"))
-    mode = check.string(section["mode"], "regions.mode") if "mode" in section else None
-    if mode is not None and mode not in REGION_MODES:
-        check.add(
-            "regions.mode",
-            f"unsupported mode {mode!r}; this release supports only 'per_region_masks' "
-            "(one binary mask file per region)",
-        )
-        mode = None
+    check.keys(
+        section,
+        "regions",
+        required=("mode", "region_type", "mask_pattern", "id_regex", "label"),
+        optional=("connectivity",),
+    )
+    mode = (
+        check.choice(section["mode"], "regions.mode", REGION_MODES)
+        if "mode" in section
+        else None
+    )
     region_type = (
         check.identifier(section["region_type"], "regions.region_type") if "region_type" in section else None
     )
@@ -258,8 +267,51 @@ def _parse_regions(check: Checker, value: Any, session_required: bool) -> Region
         if "mask_pattern" in section
         else None
     )
-    id_regex = check.regex(section["id_regex"], "regions.id_regex", group="region") if "id_regex" in section else None
-    label = check.integer(section["label"], "regions.label", minimum=1) if "label" in section else None
-    if None in (mode, region_type, mask, id_regex, label):
+    raw_regex = section.get("id_regex")
+    raw_label = section.get("label")
+    raw_connectivity = section.get("connectivity")
+    id_regex: str | None = None
+    label: int | None = None
+    connectivity: int | None = None
+
+    if mode == "per_region_masks":
+        id_regex = check.regex(raw_regex, "regions.id_regex", group="region")
+        label = check.integer(raw_label, "regions.label", minimum=1)
+        if raw_connectivity is not None:
+            check.add(
+                "regions.connectivity",
+                "must be null or omitted when regions.mode is 'per_region_masks'",
+            )
+    elif mode == "labeled_map":
+        if raw_regex is not None:
+            check.add("regions.id_regex", "must be null when regions.mode is 'labeled_map'")
+        if raw_label is not None:
+            check.add("regions.label", "must be null when regions.mode is 'labeled_map'")
+        if raw_connectivity is not None:
+            check.add("regions.connectivity", "must be null when regions.mode is 'labeled_map'")
+    elif mode == "connected_components":
+        if raw_regex is not None:
+            check.add(
+                "regions.id_regex",
+                "must be null when regions.mode is 'connected_components'",
+            )
+        label = check.integer(raw_label, "regions.label", minimum=1)
+        connectivity = check.integer(raw_connectivity, "regions.connectivity")
+        if connectivity is not None and connectivity not in (6, 26):
+            check.add("regions.connectivity", "must be either 6 or 26")
+            connectivity = None
+
+    if None in (mode, region_type, mask):
         return None
-    return RegionSpec(mode=mode, region_type=region_type, mask_pattern=mask, id_regex=id_regex, label=label)
+    if mode == "per_region_masks" and None in (id_regex, label):
+        return None
+    if mode == "connected_components" and None in (label, connectivity):
+        return None
+    return RegionSpec(
+        mode=mode,
+        region_type=region_type,
+        mask_pattern=mask,
+        id_regex=id_regex,
+        label=label,
+        connectivity=connectivity,
+    )

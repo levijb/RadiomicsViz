@@ -91,19 +91,29 @@ modalities:
 # Regions
 # -----------------------------------------------------------------------------
 regions:
-  # per_region_masks: one binary mask file per region (for example one file
-  # per lesion). This is the only mode available in this release.
+  # Choose exactly one input mode:
+  #   per_region_masks:      one existing binary file per lesion.
+  #   labeled_map:           one combined integer map; each positive integer
+  #                          is one lesion.
+  #   connected_components: one combined binary mask; connected foreground
+  #                          components become lesions.
   mode: per_region_masks
   # Kind of region, recorded in every output table.
   region_type: lesion
-  # Pattern matching every region mask of one subject/session. Each matched
-  # file is one region.
+  # per_region_masks: pattern matching every lesion mask of one subject/session.
+  # labeled_map or connected_components: pattern matching exactly one combined
+  # mask for one subject/session.
   mask_pattern: '{subject}/lesions/*.nii.gz'
-  # Applied to each mask file name. The text captured by the group "region"
-  # becomes region_id, which must be unique within a subject/session.
+  # per_region_masks only: applied to each mask file name. The captured text
+  # becomes region_id. Set to null for either combined-mask mode.
   id_regex: '^(?P<region>lesion_[0-9]+)\.nii\.gz$'
-  # Value of the region's voxels inside each mask file.
+  # per_region_masks: foreground value in every separated mask.
+  # connected_components: foreground value in the combined binary mask.
+  # labeled_map: set to null because every positive integer is a separate label.
   label: 1
+  # connected_components only: set explicitly to 6 (faces) or 26 (faces,
+  # edges and corners). Set to null for per_region_masks or labeled_map.
+  connectivity: null
 
 # -----------------------------------------------------------------------------
 # Image space and spacing

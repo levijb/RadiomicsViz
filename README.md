@@ -1,7 +1,8 @@
 # RadiomicsViz
 
-RadiomicsViz is a manifest-driven MRI radiomics package for studies with separate binary
-region masks. The current release provides deterministic input discovery and reference
+RadiomicsViz is a manifest-driven MRI radiomics package for studies with either separate
+binary lesion masks or one combined lesion mask per subject/session. The current release
+provides deterministic input discovery, safe lesion-mask materialization and reference
 whole-region PyRadiomics extraction.
 
 ## Input contract
@@ -18,6 +19,23 @@ The package checks image/mask geometry and spacing but does not correct them. Py
 can still apply operations explicitly configured in its parameter file. The frozen
 reference preset currently requests 1 x 1 x 1 mm resampling and filtered image variants;
 those are extraction settings, not a separate image-preparation stage.
+
+## Lesion-mask input choices
+
+The lesion input workflow is selected by `regions.mode` in `project.yaml`:
+
+- `per_region_masks` reads masks that are already separated, with one binary file per
+  lesion. No splitting command is needed.
+- `labeled_map` reads one combined integer map. Every positive integer label is preserved
+  as one lesion.
+- `connected_components` reads one combined binary mask and creates one lesion for each
+  connected foreground component. The YAML must explicitly choose 6- or 26-connectivity.
+
+Connected-components splitting cannot separate lesions that touch; touching foreground
+voxels remain one lesion. RadiomicsViz does not apply watershed or invent boundaries.
+The combined source files are never modified. Materialized binary masks are written under
+`output_root/materialized_regions/` with source and output hashes, voxel counts and a
+completion record.
 
 ## Installation
 
@@ -41,7 +59,19 @@ radiomicviz project init
 ```
 
 Edit `project.yaml` so its image patterns point directly to the final analysis images and
-its mask pattern points to the separate binary region masks. Preview discovery and QC:
+choose one of the lesion modes above.
+
+For already separated masks, proceed directly to the manifest preview. For a combined
+mask, first preview and then run materialization:
+
+```bash
+radiomicviz lesions materialize --project project.yaml --dry-run
+radiomicviz lesions materialize --project project.yaml
+```
+
+The second command safely resumes an identical completed materialization. If its source or
+settings changed, it stops instead of replacing output; use `--force` only after reviewing
+the change. Then preview discovery and QC:
 
 ```bash
 radiomicviz manifest --project project.yaml
@@ -77,14 +107,54 @@ radiomicviz whole \
 
 - subject and optional session discovery;
 - one analysis-ready image pattern per modality;
-- one mask pattern that finds separate binary regions;
-- the foreground label and region identifier rule;
+- one mask pattern that finds either separate binary regions or exactly one combined mask;
+- the lesion input mode and its mode-specific foreground, identifier and connectivity
+  settings;
 - the expected shared space; and
 - whether non-reference voxel spacing is allowed with an explicit warning.
 
 Patterns are relative to `data_root`. They can include `{subject}` and, for discovered
 sessions, `{session}`. The template defaults to T1 and FLAIR but modality names and image
 patterns can be edited.
+
+For existing separated masks, keep the template form:
+
+```yaml
+regions:
+  mode: per_region_masks
+  region_type: lesion
+  mask_pattern: '{subject}/lesions/*.nii.gz'
+  id_regex: '^(?P<region>lesion_[0-9]+)\.nii\.gz$'
+  label: 1
+  connectivity: null
+```
+
+For one integer-labeled map, use:
+
+```yaml
+regions:
+  mode: labeled_map
+  region_type: lesion
+  mask_pattern: '{subject}/lesions/labeled_lesions.nii.gz'
+  id_regex: null
+  label: null
+  connectivity: null
+```
+
+For one binary mask containing all lesions, use connected components and make the
+connectivity choice explicit:
+
+```yaml
+regions:
+  mode: connected_components
+  region_type: lesion
+  mask_pattern: '{subject}/lesions/all_lesions.nii.gz'
+  id_regex: null
+  label: 1
+  connectivity: 26
+```
+
+With discovered sessions, include `{session}` in every image and mask pattern.
 
 The manifest stage verifies:
 
@@ -179,6 +249,6 @@ intentional diagnostic run and stamps it non-reference with the exact deviations
 
 ## Scope
 
-The current package implements `project init`, `manifest` and `whole`. Voxelwise
-radiomics, habitat clustering, habitat-level radiomics and scheduler adapters are later
-stages.
+The current package implements `project init`, optional combined-mask lesion
+materialization, `manifest` and `whole`. Voxelwise radiomics, habitat clustering,
+habitat-level radiomics and scheduler adapters are later stages.
