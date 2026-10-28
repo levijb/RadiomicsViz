@@ -8,7 +8,7 @@ import json
 import math
 import os
 import platform
-from collections import OrderedDict
+from collections import Counter, OrderedDict
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -63,6 +63,41 @@ class _DefaultExtractionTask:
     force: bool
 
 
+class _SessionProgress:
+    """Report each subject/session once its last unit has finished."""
+
+    def __init__(
+        self, units: tuple[WholeUnit, ...], progress: Callable[[str], None] | None
+    ) -> None:
+        self._progress = progress
+        self._session_of = {
+            unit.unit_key: (unit.subject_id, unit.session_id) for unit in units
+        }
+        self._units = Counter(self._session_of.values())
+        self._finished: Counter[tuple[str, str]] = Counter()
+        self._failed: Counter[tuple[str, str]] = Counter()
+        self._reported = 0
+
+    @property
+    def sessions(self) -> int:
+        return len(self._units)
+
+    def __call__(self, item: _ProcessedUnit) -> _ProcessedUnit:
+        if self._progress is None:
+            return item
+        key = self._session_of[item.result.unit_key]
+        self._finished[key] += 1
+        self._failed[key] += item.failure is not None
+        if self._finished[key] == self._units[key]:
+            self._reported += 1
+            subject, session = key
+            self._progress(
+                f"[{self._reported}/{self.sessions}] {subject}/{session} done: "
+                f"{self._units[key]} unit(s), {self._failed[key]} failed"
+            )
+        return item
+
+
 def run_whole(
     plan: WholePlan,
     protocol: Protocol,
@@ -74,11 +109,15 @@ def run_whole(
     allow_version_mismatch: bool = False,
     extractor_factory: ExtractorFactory | None = None,
     software: Mapping[str, str] | None = None,
+    progress: Callable[[str], None] | None = None,
 ) -> WholeRunResult:
     """Run whole-region extraction for every manifest region and modality.
 
     The unit of resume is one subject, session, region, modality and variant. ``jobs``
     controls concurrent units; every unit receives its own extractor instance.
+    ``progress``, when given, receives one start line and then one line when the last
+    unit of each subject/session finishes; resumed units count as finished. It is not
+    called for a dry run.
     """
     if jobs < 1:
         raise WholeStageError("jobs must be at least 1")
@@ -127,6 +166,12 @@ def run_whole(
     targets = prepare_whole_report_targets(plan.output_root, variant)
     factory = extractor_factory or _default_extractor_factory
     tasks = list(zip(plan.units, planned))
+    track = _SessionProgress(plan.units, progress)
+    if progress is not None:
+        progress(
+            f"Running whole-region extraction (variant {variant}): {len(tasks)} unit(s) "
+            f"across {track.sessions} subject/session(s), jobs={jobs}"
+        )
 
     def process(pair: tuple[WholeUnit, WholeUnitResult]) -> _ProcessedUnit:
         unit, preview = pair
@@ -145,7 +190,7 @@ def run_whole(
         )
 
     if jobs == 1:
-        processed = [process(pair) for pair in tasks]
+        processed = [track(process(pair)) for pair in tasks]
     elif extractor_factory is None:
         # PyRadiomics parameter validation uses process-global YAML parser state and is
         # not safe when two extractors initialize in threads. Separate processes also
@@ -154,10 +199,12 @@ def run_whole(
         pending: list[_DefaultExtractionTask] = []
         for unit, preview in tasks:
             if preview.status == "would-resume":
-                completed[unit.unit_key] = _resume_unit(unit, preview.output_dir, preset)
+                completed[unit.unit_key] = track(
+                    _resume_unit(unit, preview.output_dir, preset)
+                )
             elif preview.status == "blocked":
-                completed[unit.unit_key] = _blocked_unit(
-                    unit, preview.output_dir, variant
+                completed[unit.unit_key] = track(
+                    _blocked_unit(unit, preview.output_dir, variant)
                 )
             else:
                 pending.append(
@@ -173,11 +220,11 @@ def run_whole(
         if pending:
             with ProcessPoolExecutor(max_workers=jobs) as pool:
                 for item in pool.map(_run_default_extraction_task, pending):
-                    completed[item.result.unit_key] = item
+                    completed[item.result.unit_key] = track(item)
         processed = [completed[unit.unit_key] for unit, _preview in tasks]
     else:
         with ThreadPoolExecutor(max_workers=jobs, thread_name_prefix="radiomicviz-whole") as pool:
-            processed = list(pool.map(process, tasks))
+            processed = [track(item) for item in pool.map(process, tasks)]
 
     results = tuple(item.result for item in processed)
     checks = tuple(check for item in processed for check in item.checks)

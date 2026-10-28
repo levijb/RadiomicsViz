@@ -8,6 +8,7 @@ from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
+import pytest
 import SimpleITK as sitk
 import yaml
 
@@ -178,6 +179,51 @@ def test_whole_rerun_resumes_and_dry_run_writes_nothing(tmp_path):
     assert second.succeeded == 0
     assert (second.units[0].output_dir / "whole_features.csv").stat().st_mtime_ns == first_mtime
     assert list((output_root / "tables" / "whole" / "b32").glob("*.bak-*"))
+
+
+@pytest.mark.parametrize("jobs", [1, 2])
+def test_progress_reports_each_subject_session_after_its_last_unit(tmp_path, jobs):
+    _case(tmp_path)
+    subject = tmp_path / "data" / "sub-002"
+    _write_image(subject / "anat" / "sub-002_T1w_preprocessed.nii.gz")
+    _write_image(subject / "anat" / "sub-002_FLAIR_preprocessed.nii.gz")
+    _write_mask(subject / "lesions" / "lesion_001.nii.gz", np.s_[2:5, 2:5, 2:5])
+    manifest_path = write_manifest_outputs(
+        build_manifest_preview(load_project_config(tmp_path / "project.yaml"))
+    ).manifest_path
+    plan = load_whole_plan(manifest_path)
+    protocol = _test_protocol()
+    options = dict(jobs=jobs, software=FAKE_SOFTWARE)
+    messages: list[str] = []
+
+    run_whole(
+        plan, protocol, dry_run=True, extractor_factory=_factory,
+        progress=messages.append, **options,
+    )
+    assert messages == []
+
+    first = run_whole(
+        plan, protocol, extractor_factory=lambda _path: FakeExtractor(fail_mask="sub-002"),
+        progress=messages.append, **options,
+    )
+    second = run_whole(
+        plan, protocol, extractor_factory=_factory, progress=messages.append, **options
+    )
+
+    assert (first.succeeded, first.failed) == (4, 2)
+    assert (second.resumed, second.succeeded, second.failed) == (4, 2, 0)
+    start = (
+        "Running whole-region extraction (variant b32): 6 unit(s) across "
+        f"2 subject/session(s), jobs={jobs}"
+    )
+    assert messages == [
+        start,
+        "[1/2] sub-001/ses-01 done: 4 unit(s), 0 failed",
+        "[2/2] sub-002/ses-01 done: 2 unit(s), 2 failed",
+        start,
+        "[1/2] sub-001/ses-01 done: 4 unit(s), 0 failed",
+        "[2/2] sub-002/ses-01 done: 2 unit(s), 0 failed",
+    ]
 
 
 def test_corrupted_unit_blocks_until_force_then_is_archived(tmp_path):

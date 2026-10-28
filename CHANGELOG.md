@@ -39,6 +39,9 @@ This version starts a ground-up rewrite. It is not compatible with the 0.1 serie
   the PyRadiomics parameter preset occur during feature extraction.
 - A README quick start from `project init` through manifest creation and whole-region
   extraction.
+- Progress messages on stderr for `lesions materialize`, `manifest` and `whole`: one
+  start line, then one line per subject/session. Stdout summaries are unchanged; the
+  library entry points accept an optional `progress` callback.
 - A manual, step-by-step conda installation procedure in the README and, in
   `INSTALLATION_DETAILS.md`, requirements, verification, troubleshooting and accurate
   pip-only/development guidance for the capabilities currently shipped by the package.

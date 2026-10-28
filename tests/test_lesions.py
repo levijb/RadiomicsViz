@@ -189,6 +189,7 @@ def test_cli_materialize_dry_run_and_execute(tmp_path):
     )
     assert dry.exit_code == 0, dry.output
     assert "Dry run: no lesion masks were written" in dry.output
+    assert "Materializing lesion masks" not in dry.output
     assert not output_root.exists()
 
     run = runner.invoke(
@@ -196,6 +197,28 @@ def test_cli_materialize_dry_run_and_execute(tmp_path):
     )
     assert run.exit_code == 0, run.output
     assert "completed: 1" in run.output
+    # Progress goes to stderr, which CliRunner includes in output on click 8.1 and 8.2+.
+    assert "Materializing lesion masks: 1 subject/session(s)" in run.output
+
+
+def test_materialization_progress_reports_each_subject_session_in_order(tmp_path):
+    project_path, source, data_root, _output_root = _project(
+        tmp_path, mode="labeled_map"
+    )
+    _write_image(source, _labeled_array())
+    _write_image(data_root / "sub-002" / "lesions" / "combined.nii.gz", _labeled_array())
+    plan = build_materialization_plan(load_project_config(project_path))
+    messages: list[str] = []
+
+    assert run_materialization(plan, dry_run=True, progress=messages.append).valid
+    assert messages == []
+
+    assert run_materialization(plan, progress=messages.append).valid
+    assert messages == [
+        "Materializing lesion masks: 2 subject/session(s)",
+        "[1/2] sub-001/ses-01",
+        "[2/2] sub-002/ses-01",
+    ]
 
 
 def test_materialization_is_not_used_for_already_separated_masks(tmp_path):

@@ -25,7 +25,7 @@ import os
 import re
 import shutil
 import uuid
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -232,10 +232,20 @@ def run_materialization(
     *,
     dry_run: bool = False,
     force: bool = False,
+    progress: Callable[[str], None] | None = None,
 ) -> MaterializationResult:
-    """Execute or preview a validated materialization plan."""
+    """Execute or preview a validated materialization plan.
+
+    ``progress``, when given, receives one start line and then one line as each
+    subject/session begins. It is not called for a dry run.
+    """
+    report = None if dry_run else progress
+    if report is not None:
+        report(f"Materializing lesion masks: {len(plan.units)} subject/session(s)")
     results: list[UnitResult] = []
-    for unit in plan.units:
+    for index, unit in enumerate(plan.units, start=1):
+        if report is not None:
+            report(f"[{index}/{len(plan.units)}] {unit.subject_id}/{unit.session_id}")
         if unit.status == "resume" and not force:
             results.append(_unit_result(unit, "resumed", unit.status_reason))
             continue

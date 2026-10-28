@@ -79,6 +79,24 @@ def test_valid_manifest_is_deterministic_and_uses_analysis_ready_images(tmp_path
     assert not first.errors
 
 
+def test_progress_reports_each_subject_session_in_order(tmp_path):
+    project_path, data_root, _output_root = _project(tmp_path)
+    subject = data_root / "sub-002"
+    _write_image(subject / "anat" / "sub-002_T1w_preprocessed.nii.gz")
+    _write_image(subject / "anat" / "sub-002_FLAIR_preprocessed.nii.gz")
+    _write_mask(subject / "lesions" / "lesion_001.nii.gz", np.s_[1:5, 1:5, 1:5])
+    messages: list[str] = []
+
+    preview = build_manifest_preview(load_project_config(project_path), progress=messages.append)
+
+    assert preview.valid
+    assert messages == [
+        "Building manifest: 2 subject/session(s)",
+        "[1/2] sub-001/ses-01",
+        "[2/2] sub-002/ses-01",
+    ]
+
+
 def test_nonreference_spacing_fails_by_default(tmp_path):
     project_path, _data_root, _output_root = _project(tmp_path, spacing=(1.2, 1.0, 1.0))
     preview = build_manifest_preview(load_project_config(project_path))

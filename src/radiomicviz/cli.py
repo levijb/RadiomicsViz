@@ -117,7 +117,9 @@ def lesions_materialize(
     try:
         project_config = load_project_config(project_path)
         plan = build_materialization_plan(project_config, output_root=output_root)
-        result = run_materialization(plan, dry_run=dry_run, force=force)
+        result = run_materialization(
+            plan, dry_run=dry_run, force=force, progress=_echo_progress
+        )
     except (ConfigError, MaterializationError, OSError, ValueError) as exc:
         raise click.ClickException(str(exc)) from None
 
@@ -182,7 +184,9 @@ def manifest_command(
     """
     try:
         project_config = load_project_config(project_path)
-        preview = build_manifest_preview(project_config, output_root=output_root)
+        preview = build_manifest_preview(
+            project_config, output_root=output_root, progress=_echo_progress
+        )
     except (ConfigError, ValueError) as exc:
         raise click.ClickException(str(exc)) from None
 
@@ -301,6 +305,7 @@ def whole_command(
             dry_run=dry_run,
             force=force,
             allow_version_mismatch=allow_version_mismatch,
+            progress=_echo_progress,
         )
     except (ProtocolError, WholePlanError, WholeStageError, OSError, ValueError) as exc:
         raise click.ClickException(str(exc)) from None
@@ -346,6 +351,11 @@ def whole_command(
             f"whole-region extraction failed for {result.failed} unit(s); "
             f"see {result.errors_path}"
         )
+
+
+def _echo_progress(message: str) -> None:
+    """Write a progress line to stderr so stdout summaries stay unchanged."""
+    click.echo(message, err=True)
 
 
 def _write(name: str, output: Path, force: bool) -> None:

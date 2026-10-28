@@ -6,7 +6,7 @@ import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath, PureWindowsPath
-from typing import Iterable
+from typing import Callable, Iterable
 
 import numpy as np
 import SimpleITK as sitk
@@ -82,8 +82,13 @@ def build_manifest_preview(
     project: ProjectConfig,
     *,
     output_root: str | Path | None = None,
+    progress: Callable[[str], None] | None = None,
 ) -> ManifestPreview:
-    """Discover inputs and validate them without writing any files."""
+    """Discover inputs and validate them without writing any files.
+
+    ``progress``, when given, receives one start line once every subject/session has
+    been discovered, then one line as each subject/session is validated.
+    """
     if project.source is None:
         raise ValueError("manifest discovery requires a project configuration loaded from a file")
 
@@ -168,7 +173,11 @@ def build_manifest_preview(
     mask_cache: dict[Path, tuple[_ImageInfo | None, np.ndarray | None]] = {}
     seen_image_paths: dict[tuple[str, str, Path], str] = {}
 
-    for session in sessions:
+    if progress is not None:
+        progress(f"Building manifest: {len(sessions)} subject/session(s)")
+    for index, session in enumerate(sessions, start=1):
+        if progress is not None:
+            progress(f"[{index}/{len(sessions)}] {session.subject_id}/{session.session_id}")
         sessions_found.add((session.subject_id, session.session_id))
         images: dict[str, tuple[Path, _ImageInfo]] = {}
 
