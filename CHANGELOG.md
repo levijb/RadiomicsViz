@@ -42,3 +42,5 @@ This version starts a ground-up rewrite. It is not compatible with the 0.1 serie
 - A manual, step-by-step conda installation procedure, a simplified optional setup
   wrapper and accurate pip-only/development guidance for the capabilities currently
   shipped by the package.
+- Conda-managed SimpleITK 2.5.5, avoiding pip replacement failures when a cluster's conda
+  configuration supplies the legacy distutils-installed SimpleITK 2.2.1 package.

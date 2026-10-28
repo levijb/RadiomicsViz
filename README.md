@@ -114,7 +114,22 @@ python -m pip install --editable ".[test]"
 python -m pytest -q
 ```
 
-### Troubleshooting PyRadiomics installation
+### Troubleshooting installation
+
+If environment creation stops with `Cannot uninstall SimpleITK 2.2.1`, the failed
+environment is incomplete and should not be used. Pull the corrected environment file,
+remove the partial environment and recreate it:
+
+```bash
+conda deactivate
+conda env remove --name radiomicviz --yes
+git pull --ff-only
+conda env create --file environment.yml
+conda activate radiomicviz
+```
+
+The environment file installs SimpleITK 2.5.5 through conda, which avoids asking pip to
+overwrite a legacy distutils installation. After recreation, continue with step 3 above.
 
 This project intentionally pins PyRadiomics 3.0.1. If its build cannot import NumPy or
 other build tools, confirm the environment is active and run the commands in this order:
@@ -125,8 +140,7 @@ python -m pip install "numpy==1.26.4"
 python -m pip install "pyradiomics==3.0.1" --no-build-isolation --no-deps
 ```
 
-Do not add a separate `pip install SimpleITK` step to the conda procedure:
-`environment.yml` already installs the reference SimpleITK 2.5.5 version. Installing
+Do not add a separate `pip install SimpleITK` step to the conda procedure. Installing
 SimpleITK 2.2.1 would make the run non-reference relative to this package's protocol.
 
 ## Quick start
