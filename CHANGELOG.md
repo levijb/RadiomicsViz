@@ -26,6 +26,8 @@ This version starts a ground-up rewrite. It is not compatible with the 0.1 serie
 - Optional lesion materialization from either an integer-labeled map or a combined
   binary mask with explicitly configured 6- or 26-connectivity. Source masks remain
   read-only; verified binary outputs carry per-session completion and provenance records.
+- Connected-component materialization numbers lesions by descending voxel count, so the
+  largest component is `lesion_001`, with stable source order as the tie-breaker.
 - Manifest validation of materialized-mask hashes and source hashes, preventing stale
   lesion splits from entering radiomics extraction.
 - A canonical manifest whose `image_path` points directly to an analysis-ready image.

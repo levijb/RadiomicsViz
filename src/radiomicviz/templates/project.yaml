@@ -96,7 +96,8 @@ regions:
   #   labeled_map:           one combined integer map; each positive integer
   #                          is one lesion.
   #   connected_components: one combined binary mask; connected foreground
-  #                          components become lesions.
+  #                          components become lesions numbered by descending
+  #                          voxel count (largest is lesion_001).
   mode: per_region_masks
   # Kind of region, recorded in every output table.
   region_type: lesion

@@ -38,7 +38,7 @@ from scipy import ndimage as ndi
 from radiomicviz.config._common import SAFE_ID_PATTERN
 from radiomicviz.config.project import ProjectConfig
 
-COMPLETION_SCHEMA_VERSION = 1
+COMPLETION_SCHEMA_VERSION = 2
 
 
 class MaterializationError(ValueError):
@@ -629,9 +629,14 @@ def _derive_regions(
             array == project.regions.label,
             structure=ndi.generate_binary_structure(3, rank),
         )
+        component_sizes = np.bincount(labeled.ravel(), minlength=int(count) + 1)
+        component_ids = sorted(
+            range(1, int(count) + 1),
+            key=lambda component_id: (-int(component_sizes[component_id]), component_id),
+        )
         return [
-            (f"{prefix}_{component:03d}", labeled == component, None, component)
-            for component in range(1, int(count) + 1)
+            (f"{prefix}_{ranked_id:03d}", labeled == component_id, None, component_id)
+            for ranked_id, component_id in enumerate(component_ids, start=1)
         ]
     raise MaterializationError(f"unsupported materialization mode: {project.regions.mode}")
 

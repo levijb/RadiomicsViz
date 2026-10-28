@@ -29,7 +29,9 @@ The lesion input workflow is selected by `regions.mode` in `project.yaml`:
 - `labeled_map` reads one combined integer map. Every positive integer label is preserved
   as one lesion.
 - `connected_components` reads one combined binary mask and creates one lesion for each
-  connected foreground component. The YAML must explicitly choose 6- or 26-connectivity.
+  connected foreground component. Materialized lesions are numbered by descending voxel
+  count, so the largest is `lesion_001`; equal-sized components retain their deterministic
+  source-component order. The YAML must explicitly choose 6- or 26-connectivity.
 
 Connected-components splitting cannot separate lesions that touch; touching foreground
 voxels remain one lesion. RadiomicsViz does not apply watershed or invent boundaries.

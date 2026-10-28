@@ -110,6 +110,36 @@ def test_connected_component_connectivity_is_explicit(tmp_path, connectivity, ex
     assert result.units[0].n_regions == expected
 
 
+def test_connected_components_are_numbered_by_descending_voxel_count(tmp_path):
+    project_path, source, _data_root, output_root = _project(
+        tmp_path, mode="connected_components", connectivity=6
+    )
+    array = np.zeros((10, 10, 10), dtype=np.uint8)
+    array[1, 1, 1] = 1
+    array[5:7, 5:7, 5:7] = 1
+    _write_image(source, array)
+
+    plan = build_materialization_plan(load_project_config(project_path))
+    regions = plan.units[0].regions
+    assert [region.region_id for region in regions] == ["lesion_001", "lesion_002"]
+    assert [region.n_voxels for region in regions] == [8, 1]
+    assert [region.component_id for region in regions] == [2, 1]
+
+    assert run_materialization(plan).valid
+    root = output_root / "materialized_regions" / "sub-001" / "ses-01" / "lesion"
+    largest = sitk.GetArrayFromImage(
+        sitk.ReadImage(str(root / "lesion_001" / "mask.nii.gz"))
+    )
+    assert int(np.count_nonzero(largest)) == 8
+
+    marker = json.loads(
+        (root / ".materialization" / "complete.json").read_text(encoding="utf-8")
+    )
+    assert marker["schema_version"] == 2
+    assert [record["n_voxels"] for record in marker["regions"]] == [8, 1]
+    assert [record["component_id"] for record in marker["regions"]] == [2, 1]
+
+
 def test_connected_components_rejects_nonbinary_source(tmp_path):
     project_path, source, _data_root, _output_root = _project(
         tmp_path, mode="connected_components", connectivity=26
