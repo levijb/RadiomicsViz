@@ -98,6 +98,12 @@ class WholeRunResult:
         return sum(unit.status == "resumed" for unit in self.units)
 
     @property
+    def skipped(self) -> int:
+        return sum(
+            unit.status in {"skipped", "resumed-skipped"} for unit in self.units
+        )
+
+    @property
     def blocked(self) -> int:
         return sum(unit.status == "blocked" for unit in self.units)
 

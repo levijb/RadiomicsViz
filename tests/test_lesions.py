@@ -97,9 +97,9 @@ def test_connected_component_connectivity_is_explicit(tmp_path, connectivity, ex
     project_path, source, _data_root, _output_root = _project(
         tmp_path, mode="connected_components", connectivity=connectivity
     )
-    array = np.zeros((5, 5, 5), dtype=np.uint8)
-    array[1, 1, 1] = 1
-    array[2, 2, 2] = 1
+    array = np.zeros((8, 8, 8), dtype=np.uint8)
+    array[1:3, 1:3, 1:4] = 1
+    array[3:5, 3:5, 4:7] = 1
     _write_image(source, array)
 
     plan = build_materialization_plan(load_project_config(project_path))
@@ -114,30 +114,59 @@ def test_connected_components_are_numbered_by_descending_voxel_count(tmp_path):
     project_path, source, _data_root, output_root = _project(
         tmp_path, mode="connected_components", connectivity=6
     )
-    array = np.zeros((10, 10, 10), dtype=np.uint8)
+    array = np.zeros((12, 12, 12), dtype=np.uint8)
     array[1, 1, 1] = 1
-    array[5:7, 5:7, 5:7] = 1
+    array[4:6, 4:6, 4:7] = 1
+    array[8, 3:5, 1:6] = 1
     _write_image(source, array)
 
     plan = build_materialization_plan(load_project_config(project_path))
     regions = plan.units[0].regions
     assert [region.region_id for region in regions] == ["lesion_001", "lesion_002"]
-    assert [region.n_voxels for region in regions] == [8, 1]
-    assert [region.component_id for region in regions] == [2, 1]
+    assert [region.n_voxels for region in regions] == [12, 10]
+    assert [region.component_id for region in regions] == [2, 3]
+    assert [region.n_voxels for region in plan.units[0].excluded_regions] == [1]
 
     assert run_materialization(plan).valid
     root = output_root / "materialized_regions" / "sub-001" / "ses-01" / "lesion"
     largest = sitk.GetArrayFromImage(
         sitk.ReadImage(str(root / "lesion_001" / "mask.nii.gz"))
     )
-    assert int(np.count_nonzero(largest)) == 8
+    assert int(np.count_nonzero(largest)) == 12
 
     marker = json.loads(
         (root / ".materialization" / "complete.json").read_text(encoding="utf-8")
     )
-    assert marker["schema_version"] == 2
-    assert [record["n_voxels"] for record in marker["regions"]] == [8, 1]
-    assert [record["component_id"] for record in marker["regions"]] == [2, 1]
+    assert marker["schema_version"] == 3
+    assert marker["minimum_region_voxels"] == 10
+    assert [record["n_voxels"] for record in marker["regions"]] == [12, 10]
+    assert [record["component_id"] for record in marker["regions"]] == [2, 3]
+    assert marker["n_regions_excluded_below_minimum"] == 1
+    assert marker["excluded_regions"][0]["n_voxels"] == 1
+
+
+def test_materialization_includes_ten_voxels_and_excludes_nine(tmp_path):
+    project_path, source, _data_root, output_root = _project(
+        tmp_path, mode="labeled_map"
+    )
+    array = np.zeros((8, 8, 8), dtype=np.uint8)
+    array[1, 1:4, 1:4] = 1
+    array[4:6, 4, 1:6] = 2
+    _write_image(source, array)
+
+    plan = build_materialization_plan(load_project_config(project_path))
+
+    assert [region.source_label for region in plan.units[0].regions] == [2]
+    assert [region.n_voxels for region in plan.units[0].regions] == [10]
+    assert [region.source_label for region in plan.units[0].excluded_regions] == [1]
+    assert [region.n_voxels for region in plan.units[0].excluded_regions] == [9]
+    result = run_materialization(plan)
+    assert result.valid
+    assert result.units[0].n_regions == 1
+    assert result.units[0].n_excluded_regions == 1
+    root = output_root / "materialized_regions" / "sub-001" / "ses-01" / "lesion"
+    assert not (root / "lesion_001").exists()
+    assert (root / "lesion_002" / "mask.nii.gz").is_file()
 
 
 def test_connected_components_rejects_nonbinary_source(tmp_path):
@@ -172,7 +201,20 @@ def test_changed_source_blocks_until_force_and_archives_previous_tree(tmp_path):
     assert forced.valid and forced.completed == 1
     parent = output_root / "materialized_regions" / "sub-001" / "ses-01"
     assert len(list(parent.glob("lesion.bak-*"))) == 1
-    assert (parent / "lesion" / "lesion_007" / "mask.nii.gz").is_file()
+    assert not (parent / "lesion" / "lesion_007").exists()
+    marker = json.loads(
+        (parent / "lesion" / ".materialization" / "complete.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert marker["excluded_regions"] == [
+        {
+            "component_id": None,
+            "n_voxels": 1,
+            "region_id": "lesion_007",
+            "source_label": 7,
+        }
+    ]
 
 
 def test_manifest_requires_current_materialization_then_uses_binary_outputs(tmp_path):
@@ -227,6 +269,7 @@ def test_cli_materialize_dry_run_and_execute(tmp_path):
     )
     assert run.exit_code == 0, run.output
     assert "completed: 1" in run.output
+    assert "minimum lesion size: 10 voxels" in run.output
     # Progress goes to stderr, which CliRunner includes in output on click 8.1 and 8.2+.
     assert "Materializing lesion masks: 1 subject/session(s)" in run.output
 

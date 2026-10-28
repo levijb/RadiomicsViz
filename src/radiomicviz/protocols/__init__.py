@@ -5,6 +5,7 @@ from radiomicviz.protocols.loader import (
     Protocol,
     ProtocolError,
     RoiPreset,
+    VoxelwisePreset,
     load_protocol,
 )
 
@@ -13,5 +14,6 @@ __all__ = [
     "Protocol",
     "ProtocolError",
     "RoiPreset",
+    "VoxelwisePreset",
     "load_protocol",
 ]

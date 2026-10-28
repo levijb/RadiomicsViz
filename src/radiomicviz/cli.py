@@ -16,11 +16,18 @@ from radiomicviz.lesions import (
 )
 from radiomicviz.manifest import build_manifest_preview, write_manifest_outputs
 from radiomicviz.protocols import ProtocolError, load_protocol
+from radiomicviz.policy import MINIMUM_REGION_VOXELS
 from radiomicviz.whole import (
     WholePlanError,
     WholeStageError,
     load_whole_plan,
     run_whole,
+)
+from radiomicviz.voxelwise import (
+    VoxelwisePlanError,
+    VoxelwiseStageError,
+    load_voxelwise_plan,
+    run_voxelwise,
 )
 
 CONTEXT_SETTINGS = {"help_option_names": ["-h", "--help"]}
@@ -112,7 +119,8 @@ def lesions_materialize(
 
     ``labeled_map`` preserves each positive integer label as one lesion.
     ``connected_components`` splits a binary foreground using the connectivity stated
-    in project.yaml. Touching foreground voxels remain one lesion.
+    in project.yaml. Touching foreground voxels remain one lesion. Regions smaller than
+    the package-wide minimum are recorded in provenance but are not materialized.
     """
     try:
         project_config = load_project_config(project_path)
@@ -127,13 +135,15 @@ def lesions_materialize(
     click.echo(f"  mode: {plan.project.regions.mode}")
     if plan.project.regions.connectivity is not None:
         click.echo(f"  connectivity: {plan.project.regions.connectivity}")
+    click.echo(f"  minimum lesion size: {MINIMUM_REGION_VOXELS} voxels")
     click.echo(f"  output root: {plan.output_root}")
     click.echo(f"  subject/session units: {len(plan.units)}")
     for unit in result.units:
         detail = f" ({unit.message})" if unit.message else ""
         click.echo(
             f"  {unit.status:<29} {unit.subject_id}/{unit.session_id}: "
-            f"{unit.n_regions} lesion(s) -> {unit.output_dir}{detail}"
+            f"{unit.n_regions} lesion(s), {unit.n_excluded_regions} below minimum "
+            f"-> {unit.output_dir}{detail}"
         )
     if dry_run:
         click.echo("Dry run: no lesion masks were written.")
@@ -338,6 +348,7 @@ def whole_command(
 
     click.echo(f"  completed: {result.succeeded}")
     click.echo(f"  resumed: {result.resumed}")
+    click.echo(f"  skipped (< minimum ROI size): {result.skipped}")
     click.echo(f"  failed: {result.failed}")
     click.echo(f"  warnings: {result.warnings}")
     click.echo(f"  table: {result.table_path}")
@@ -349,6 +360,128 @@ def whole_command(
     if not result.valid:
         raise click.ClickException(
             f"whole-region extraction failed for {result.failed} unit(s); "
+            f"see {result.errors_path}"
+        )
+
+
+@main.command("voxelwise", context_settings=CONTEXT_SETTINGS)
+@click.option(
+    "--manifest",
+    "manifest_path",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    required=True,
+    help="Canonical regions_manifest.csv written by the manifest stage.",
+)
+@click.option(
+    "--protocol",
+    "protocol_id",
+    default="lesion-habitat-v1",
+    show_default=True,
+    help="Built-in scientific protocol identifier.",
+)
+@click.option(
+    "--variant",
+    default="b32",
+    show_default=True,
+    help="Protocol variant. The initial reference implementation provides b32.",
+)
+@click.option(
+    "--jobs",
+    type=click.IntRange(min=1),
+    default=1,
+    show_default=True,
+    help="Number of region-modality units to extract concurrently.",
+)
+@click.option(
+    "--dry-run",
+    is_flag=True,
+    help="Show which units would run, resume or be blocked without writing files.",
+)
+@click.option(
+    "--force",
+    is_flag=True,
+    help="Archive existing unit outputs and recompute them instead of resuming.",
+)
+@click.option(
+    "--allow-version-mismatch",
+    is_flag=True,
+    help="Run with non-reference software versions and stamp the deviation in every report.",
+)
+def voxelwise_command(
+    manifest_path: Path,
+    protocol_id: str,
+    variant: str,
+    jobs: int,
+    dry_run: bool,
+    force: bool,
+    allow_version_mismatch: bool,
+) -> None:
+    """Extract reference voxelwise PyRadiomics feature maps.
+
+    Every manifest region and modality is one resumable unit. Successful units contain
+    one float64 NRRD per protocol feature. Regions below the preset's minimum ROI size
+    are recorded as expected skips rather than silently disappearing.
+    """
+    try:
+        plan = load_voxelwise_plan(manifest_path)
+        protocol = load_protocol(protocol_id)
+        result = run_voxelwise(
+            plan,
+            protocol,
+            variant=variant,
+            jobs=jobs,
+            dry_run=dry_run,
+            force=force,
+            allow_version_mismatch=allow_version_mismatch,
+            progress=_echo_progress,
+        )
+    except (
+        ProtocolError,
+        VoxelwisePlanError,
+        VoxelwiseStageError,
+        OSError,
+        ValueError,
+    ) as exc:
+        raise click.ClickException(str(exc)) from None
+
+    click.echo("Voxelwise plan" if dry_run else "Voxelwise result")
+    click.echo(f"  manifest: {result.manifest_path}")
+    click.echo(f"  output root: {result.output_root}")
+    click.echo(f"  protocol: {result.protocol_id} {result.protocol_version}")
+    click.echo(f"  variant: {result.variant}")
+    click.echo(f"  preset: {result.preset_id}")
+    click.echo(f"  preset SHA-256: {result.preset_sha256}")
+    click.echo(f"  region-modality units: {len(result.units)}")
+    click.echo(f"  concurrent jobs: {result.jobs}")
+    click.echo(
+        "  reference status: "
+        + ("reference-compatible" if result.reference_compatible else "non-reference")
+    )
+    for deviation in result.reference_deviations:
+        click.echo(f"    - {deviation}")
+    if dry_run:
+        for unit in result.units:
+            click.echo(f"  {unit.status:<14} {unit.unit_key} -> {unit.output_dir}")
+        click.echo("Dry run: no extraction performed and no files written.")
+        if result.blocked:
+            raise click.ClickException(
+                f"{result.blocked} unit(s) have outputs without a matching completion "
+                "record; rerun with --force to archive and recompute them"
+            )
+        return
+
+    click.echo(f"  completed: {result.succeeded}")
+    click.echo(f"  resumed: {result.resumed}")
+    click.echo(f"  skipped (< minimum ROI size): {result.skipped}")
+    click.echo(f"  failed: {result.failed}")
+    click.echo(f"  warnings: {result.warnings}")
+    click.echo(f"  QC: {result.checks_path}")
+    click.echo(f"  errors: {result.errors_path}")
+    click.echo(f"  metadata: {result.metadata_path}")
+    click.echo(f"  log: {result.log_path}")
+    if not result.valid:
+        raise click.ClickException(
+            f"voxelwise extraction failed for {result.failed} unit(s); "
             f"see {result.errors_path}"
         )
 

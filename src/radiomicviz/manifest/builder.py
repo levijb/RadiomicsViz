@@ -15,6 +15,7 @@ from radiomicviz.config._common import SAFE_ID_PATTERN
 from radiomicviz.config.project import ProjectConfig
 from radiomicviz.lesions import MaterializationError, materialized_masks_for_session
 from radiomicviz.manifest.models import CheckRow, ErrorRow, ManifestPreview, ManifestRow
+from radiomicviz.policy import MINIMUM_REGION_VOXELS
 
 REFERENCE_SPACING_MM = (1.0, 1.0, 1.0)
 SPACING_TOLERANCE_MM = 0.001
@@ -361,15 +362,19 @@ def build_manifest_preview(
             )
             size_status = "WARN" if voxel_count < 50 else "PASS"
             size_message = (
-                "region has fewer than 10 voxels; voxelwise behavior requires later testing"
-                if voxel_count < 10
+                f"region has fewer than {MINIMUM_REGION_VOXELS} voxels and will be "
+                "skipped by radiomics extraction"
+                if voxel_count < MINIMUM_REGION_VOXELS
                 else "region has fewer than 50 voxels; habitat splitting will fall back"
                 if voxel_count < 50
                 else "region size passes the reference habitat split threshold"
             )
             collect.check(
                 "region_voxel_count", size_status, path=str(mask_path),
-                measured_value=str(voxel_count), threshold="10 and 50 voxel downstream thresholds",
+                measured_value=str(voxel_count),
+                threshold=(
+                    f"{MINIMUM_REGION_VOXELS} and 50 voxel downstream thresholds"
+                ),
                 message=size_message, **region_scope,
             )
 

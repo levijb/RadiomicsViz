@@ -8,6 +8,15 @@ This version starts a ground-up rewrite. It is not compatible with the 0.1 serie
 
 ### Added
 
+- A package-wide 10-voxel minimum lesion size. Combined-mask materialization excludes
+  smaller labels/components while preserving their details in provenance, and
+  whole-region extraction independently records smaller externally supplied masks as
+  resumable skips rather than PyRadiomics failures.
+- Reference 32-bin voxelwise radiomics using the authenticated validation parameter file,
+  manifest-driven region/modality units, 92 float64 NRRD feature maps, exact map-schema
+  validation, concurrent local execution, per-unit resume and replacement, QC, errors and
+  provenance. Regions below the preset's 10-voxel minimum are retained as explicit,
+  resumable skips rather than failing the invocation or silently disappearing.
 - Reference 32-bin whole-region radiomics with an immutable PyRadiomics preset,
   minimal built-in protocol, concurrent local execution, per-unit resume and
   replacement, cohort exports, QC, errors and provenance.

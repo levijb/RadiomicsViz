@@ -3,13 +3,15 @@
 Two explicit scientific interpretations are supported:
 
 ``labeled_map``
-    Every positive integer in the source map is one lesion. This preserves the
-    behavior of the historical ``materialize_labeled_lesions.py`` workflow.
+    Every positive integer in the source map identifies one candidate lesion.
 
 ``connected_components``
     The configured foreground value in a binary mask is split with the configured
     6- or 26-neighbor definition. Touching lesions are one component; this command
     deliberately does not introduce watershed or other inferred boundaries.
+
+Candidate lesions smaller than the package-wide 10-voxel minimum are recorded in
+provenance but are not written as binary masks.
 
 Source data are read-only. A complete tree is written and read back in a private
 staging directory before it replaces any canonical materialization. Existing output
@@ -37,8 +39,9 @@ from scipy import ndimage as ndi
 
 from radiomicviz.config._common import SAFE_ID_PATTERN
 from radiomicviz.config.project import ProjectConfig
+from radiomicviz.policy import MINIMUM_REGION_VOXELS
 
-COMPLETION_SCHEMA_VERSION = 2
+COMPLETION_SCHEMA_VERSION = 3
 
 
 class MaterializationError(ValueError):
@@ -71,6 +74,7 @@ class MaterializationUnit:
     source_sha256: str
     output_dir: Path
     regions: tuple[RegionPlan, ...]
+    excluded_regions: tuple[RegionPlan, ...]
     status: str
     status_reason: str
 
@@ -94,6 +98,7 @@ class UnitResult:
     output_dir: Path
     status: str
     n_regions: int
+    n_excluded_regions: int
     message: str = ""
 
 
@@ -184,7 +189,7 @@ def build_materialization_plan(
         source_path = matches[0]
         source_hash = _sha256_file(source_path)
         _image, array = _load_combined_mask(source_path)
-        regions = _derive_region_plan(project, array)
+        regions, excluded_regions = _derive_region_plan(project, array)
         output_dir = materialized_session_root(
             resolved_output,
             session.subject_id,
@@ -214,6 +219,7 @@ def build_materialization_plan(
                 source_sha256=source_hash,
                 output_dir=output_dir,
                 regions=regions,
+                excluded_regions=excluded_regions,
                 status=status,
                 status_reason=status_reason,
             )
@@ -340,6 +346,7 @@ def _unit_result(unit: MaterializationUnit, status: str, message: str) -> UnitRe
         output_dir=unit.output_dir,
         status=status,
         n_regions=len(unit.regions),
+        n_excluded_regions=len(unit.excluded_regions),
         message=message,
     )
 
@@ -490,7 +497,18 @@ def _write_staging_tree(
             "mode": project.regions.mode,
             "foreground_label": project.regions.label,
             "connectivity": project.regions.connectivity,
+            "minimum_region_voxels": MINIMUM_REGION_VOXELS,
             "n_regions": len(records),
+            "n_regions_excluded_below_minimum": len(unit.excluded_regions),
+            "excluded_regions": [
+                {
+                    "region_id": region.region_id,
+                    "source_label": region.source_label,
+                    "component_id": region.component_id,
+                    "n_voxels": region.n_voxels,
+                }
+                for region in unit.excluded_regions
+            ],
         },
     )
     return records
@@ -513,8 +531,19 @@ def _completion_payload(
         "mode": project.regions.mode,
         "foreground_label": project.regions.label,
         "connectivity": project.regions.connectivity,
+        "minimum_region_voxels": MINIMUM_REGION_VOXELS,
         "source_mask": str(unit.source_path),
         "source_mask_sha256": unit.source_sha256,
+        "n_regions_excluded_below_minimum": len(unit.excluded_regions),
+        "excluded_regions": [
+            {
+                "region_id": region.region_id,
+                "source_label": region.source_label,
+                "component_id": region.component_id,
+                "n_voxels": region.n_voxels,
+            }
+            for region in unit.excluded_regions
+        ],
         "regions": records,
     }
 
@@ -556,6 +585,7 @@ def _validate_complete_tree(
         "mode": project.regions.mode,
         "foreground_label": project.regions.label,
         "connectivity": project.regions.connectivity,
+        "minimum_region_voxels": MINIMUM_REGION_VOXELS,
         "source_mask": str(source_path),
         "source_mask_sha256": source_sha256,
     }
@@ -592,19 +622,41 @@ def _validate_complete_tree(
     return True, "ok", marker
 
 
-def _derive_region_plan(project: ProjectConfig, array: np.ndarray) -> tuple[RegionPlan, ...]:
-    return tuple(
+def _derive_region_plan(
+    project: ProjectConfig, array: np.ndarray
+) -> tuple[tuple[RegionPlan, ...], tuple[RegionPlan, ...]]:
+    planned = tuple(
         RegionPlan(
             region_id=region_id,
             source_label=source_label,
             component_id=component_id,
             n_voxels=int(np.count_nonzero(component)),
         )
-        for region_id, component, source_label, component_id in _derive_regions(project, array)
+        for region_id, component, source_label, component_id in _derive_all_regions(
+            project, array
+        )
     )
+    included = tuple(
+        region for region in planned if region.n_voxels >= MINIMUM_REGION_VOXELS
+    )
+    excluded = tuple(
+        region for region in planned if region.n_voxels < MINIMUM_REGION_VOXELS
+    )
+    return included, excluded
 
 
 def _derive_regions(
+    project: ProjectConfig,
+    array: np.ndarray,
+) -> list[tuple[str, np.ndarray, int | None, int | None]]:
+    return [
+        region
+        for region in _derive_all_regions(project, array)
+        if int(np.count_nonzero(region[1])) >= MINIMUM_REGION_VOXELS
+    ]
+
+
+def _derive_all_regions(
     project: ProjectConfig,
     array: np.ndarray,
 ) -> list[tuple[str, np.ndarray, int | None, int | None]]:

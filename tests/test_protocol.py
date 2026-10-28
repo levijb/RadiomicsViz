@@ -18,10 +18,29 @@ def test_builtin_protocol_authenticates_frozen_roi_preset():
         "cd2f3e1da1028daaec55b5573b7e2d986b7f34302617452103724d94ff0f942b"
     )
     assert preset.expected_feature_count == 1834
+    assert preset.minimum_roi_size == 10
     assert preset.expected_shape_feature_count == 14
     assert preset.expected_diagnostics_count == 37
     assert preset.expected_feature_schema_sha256 == (
         "f4ea6da5d5191bfb24ad81f05cf7792d7c853294e460fcaf959621c00f02240e"
+    )
+
+
+def test_builtin_protocol_authenticates_frozen_voxelwise_preset():
+    preset = load_protocol().voxelwise_preset("b32")
+
+    assert preset.parameter_path.stat().st_size == 2467
+    assert hashlib.sha256(preset.parameter_path.read_bytes()).hexdigest() == (
+        "ae781c704fd5688bd5ecf9f0a8083464e3981d21dbd2f1bd2a1e31ec48eb5cde"
+    )
+    assert preset.expected_map_count == 92
+    assert len(preset.expected_map_names) == 92
+    assert preset.minimum_roi_size == 10
+    assert preset.kernel_radius == 1
+    assert "original_glcm_SumAverage" in preset.expected_map_names
+    assert "original_glcm_MCC" not in preset.expected_map_names
+    assert preset.expected_map_schema_sha256 == (
+        "3c94d68cd7905ad9dd58a8055419796a345c50a426e54ec1f0d401ddeccc9134"
     )
 
 

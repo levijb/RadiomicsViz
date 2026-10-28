@@ -1,6 +1,6 @@
 schema_version: 1
 protocol_id: lesion-habitat-v1
-protocol_version: 1.0.0
+protocol_version: 1.2.0
 status: reference-verified
 software:
   python: 3.10.10
@@ -12,3 +12,4 @@ variants:
   b32:
     status: reference-verified
     roi_preset_metadata: roi-allfeatures-bin32.metadata.json
+    voxelwise_preset_metadata: voxelwise-original-bin32.metadata.json

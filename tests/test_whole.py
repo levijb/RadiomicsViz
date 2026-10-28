@@ -52,7 +52,7 @@ def _case(tmp_path: Path):
     _write_image(subject / "anat" / "sub-001_T1w_preprocessed.nii.gz")
     _write_image(subject / "anat" / "sub-001_FLAIR_preprocessed.nii.gz")
     _write_mask(subject / "lesions" / "lesion_001.nii.gz", np.s_[2:5, 2:5, 2:5])
-    _write_mask(subject / "lesions" / "lesion_002.nii.gz", np.s_[4:6, 4:6, 4:6])
+    _write_mask(subject / "lesions" / "lesion_002.nii.gz", np.s_[6:7, 1:3, 1:6])
     project = yaml.safe_load(template_text("project"))
     project["data_root"] = str(data_root)
     project["output_root"] = str(tmp_path / "output")
@@ -218,11 +218,11 @@ def test_progress_reports_each_subject_session_after_its_last_unit(tmp_path, job
     )
     assert messages == [
         start,
-        "[1/2] sub-001/ses-01 done: 4 unit(s), 0 failed",
-        "[2/2] sub-002/ses-01 done: 2 unit(s), 2 failed",
+        "[1/2] sub-001/ses-01 done: 4 unit(s), 0 skipped, 0 failed",
+        "[2/2] sub-002/ses-01 done: 2 unit(s), 0 skipped, 2 failed",
         start,
-        "[1/2] sub-001/ses-01 done: 4 unit(s), 0 failed",
-        "[2/2] sub-002/ses-01 done: 2 unit(s), 0 failed",
+        "[1/2] sub-001/ses-01 done: 4 unit(s), 0 skipped, 0 failed",
+        "[2/2] sub-002/ses-01 done: 2 unit(s), 0 skipped, 0 failed",
     ]
 
 
@@ -275,6 +275,42 @@ def test_failed_units_remain_in_cohort_table_with_error_text(tmp_path):
     assert len(failed) == 2
     assert all("deliberate extraction failure" in row["error"] for row in failed)
     assert len(_rows(result.errors_path)) == 2
+
+
+def test_whole_skips_external_masks_below_ten_voxels_and_resumes_skip(tmp_path):
+    _manifest_path, _output_root = _case(tmp_path)
+    small_mask = tmp_path / "data" / "sub-001" / "lesions" / "lesion_002.nii.gz"
+    _write_mask(small_mask, np.s_[6:7, 1:4, 1:4])
+    manifest_path = write_manifest_outputs(
+        build_manifest_preview(load_project_config(tmp_path / "project.yaml"))
+    ).manifest_path
+    plan = load_whole_plan(manifest_path)
+    protocol = _test_protocol()
+
+    first = run_whole(
+        plan, protocol, extractor_factory=_factory, software=FAKE_SOFTWARE
+    )
+
+    assert first.valid
+    assert (first.succeeded, first.skipped, first.failed) == (2, 2, 0)
+    skipped = [unit for unit in first.units if unit.status == "skipped"]
+    assert len(skipped) == 2
+    assert all(unit.row["mask_voxels"] == 9 for unit in skipped)
+    assert all(str(unit.row["error"]).startswith("skipped:") for unit in skipped)
+    assert all(
+        json.loads(unit.completion_path.read_text(encoding="utf-8"))["status"]
+        == "skipped"
+        for unit in skipped
+    )
+    assert _rows(first.errors_path) == []
+    metadata = json.loads(first.metadata_path.read_text(encoding="utf-8"))
+    assert metadata["skipped"] == 2
+
+    second = run_whole(
+        plan, protocol, extractor_factory=_factory, software=FAKE_SOFTWARE
+    )
+    assert (second.resumed, second.skipped, second.failed) == (2, 2, 0)
+    assert sum(unit.status == "resumed-skipped" for unit in second.units) == 2
 
 
 def test_version_mismatch_fails_by_default_and_can_be_stamped(tmp_path):

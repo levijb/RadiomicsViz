@@ -76,6 +76,7 @@ class _SessionProgress:
         self._units = Counter(self._session_of.values())
         self._finished: Counter[tuple[str, str]] = Counter()
         self._failed: Counter[tuple[str, str]] = Counter()
+        self._skipped: Counter[tuple[str, str]] = Counter()
         self._reported = 0
 
     @property
@@ -88,12 +89,14 @@ class _SessionProgress:
         key = self._session_of[item.result.unit_key]
         self._finished[key] += 1
         self._failed[key] += item.failure is not None
+        self._skipped[key] += item.result.status in {"skipped", "resumed-skipped"}
         if self._finished[key] == self._units[key]:
             self._reported += 1
             subject, session = key
             self._progress(
                 f"[{self._reported}/{self.sessions}] {subject}/{session} done: "
-                f"{self._units[key]} unit(s), {self._failed[key]} failed"
+                f"{self._units[key]} unit(s), {self._skipped[key]} skipped, "
+                f"{self._failed[key]} failed"
             )
         return item
 
@@ -319,6 +322,21 @@ def _extract_unit(
     log = [f"[{unit.unit_key}] extraction started"]
     try:
         mask_voxels = _mask_voxel_count(unit)
+        if mask_voxels < preset.minimum_roi_size:
+            return _commit_skip(
+                unit,
+                plan,
+                protocol,
+                preset,
+                software,
+                work_dir=work_dir,
+                final_dir=final_dir,
+                archived=archived,
+                started=started,
+                mask_voxels=mask_voxels,
+                checks=checks,
+                log=log,
+            )
         extractor = factory(preset.parameter_path)
         vector = OrderedDict(
             extractor.execute(
@@ -337,7 +355,7 @@ def _extract_unit(
         _write_one_row_csv(result_path, row)
         finished = _utc_now()
         completion = {
-            "schema_version": 1,
+            "schema_version": 2,
             "stage": "whole",
             "status": "complete",
             "unit_key": unit.unit_key,
@@ -354,6 +372,7 @@ def _extract_unit(
             "input_mask": _fingerprint(unit.mask_path),
             "label": unit.label,
             "mask_voxels": mask_voxels,
+            "minimum_roi_size": preset.minimum_roi_size,
             "diagnostics_count": len(diagnostics),
             "feature_count": len(features),
             "feature_schema_sha256": _schema_hash(features),
@@ -426,7 +445,93 @@ def _extract_unit(
         )
 
 
+def _commit_skip(
+    unit: WholeUnit,
+    plan: WholePlan,
+    protocol: Protocol,
+    preset: RoiPreset,
+    software: Mapping[str, str],
+    *,
+    work_dir: Path,
+    final_dir: Path,
+    archived: Path | None,
+    started: str,
+    mask_voxels: int,
+    checks: list[WholeCheck],
+    log: list[str],
+) -> _ProcessedUnit:
+    reason = (
+        f"region has {mask_voxels} voxels; whole-region protocol requires at least "
+        f"{preset.minimum_roi_size}"
+    )
+    row = _base_row(unit, preset.variant, mask_voxels=mask_voxels)
+    row["error"] = f"skipped: {reason}"
+    result_path = work_dir / "whole_features.csv"
+    _write_one_row_csv(result_path, row)
+    completion = {
+        "schema_version": 2,
+        "stage": "whole",
+        "status": "skipped",
+        "unit_key": unit.unit_key,
+        "variant": preset.variant,
+        "package_version": __version__,
+        "protocol_id": protocol.protocol_id,
+        "protocol_version": protocol.protocol_version,
+        "protocol_sha256": protocol.sha256,
+        "manifest_sha256": plan.manifest_sha256,
+        "preset_id": preset.preset_id,
+        "preset_sha256": preset.parameter_sha256,
+        "software": dict(software),
+        "input_image": _fingerprint(unit.image_path),
+        "input_mask": _fingerprint(unit.mask_path),
+        "label": unit.label,
+        "mask_voxels": mask_voxels,
+        "minimum_roi_size": preset.minimum_roi_size,
+        "skip_reason": reason,
+        "started_utc": started,
+        "finished_utc": _utc_now(),
+        "supersedes": str(archived.resolve()) if archived else None,
+        "outputs": {
+            "whole_features": _fingerprint(
+                result_path, recorded_path=final_dir / result_path.name
+            )
+        },
+    }
+    _atomic_text(
+        work_dir / "completion.json",
+        json.dumps(completion, indent=2, sort_keys=True) + "\n",
+    )
+    final_dir.parent.mkdir(parents=True, exist_ok=True)
+    work_dir.replace(final_dir)
+    checks.append(
+        _check(
+            unit,
+            "whole_minimum_roi_size",
+            "WARN",
+            measured=str(mask_voxels),
+            threshold=f">={preset.minimum_roi_size}",
+            message=reason,
+            path=unit.mask_path,
+        )
+    )
+    log.append(f"[{unit.unit_key}] skipped: {reason}")
+    return _ProcessedUnit(
+        result=WholeUnitResult(
+            unit_key=unit.unit_key,
+            status="skipped",
+            output_dir=final_dir,
+            completion_path=final_dir / "completion.json",
+            row=row,
+        ),
+        checks=tuple(checks),
+        failure=None,
+        log_lines=tuple(log),
+    )
+
+
 def _resume_unit(unit: WholeUnit, output_dir: Path, preset: RoiPreset) -> _ProcessedUnit:
+    completion = json.loads((output_dir / "completion.json").read_text(encoding="utf-8"))
+    skipped = completion.get("status") == "skipped"
     result_path = output_dir / "whole_features.csv"
     with result_path.open(encoding="utf-8", newline="") as handle:
         reader = csv.DictReader(handle)
@@ -439,16 +544,28 @@ def _resume_unit(unit: WholeUnit, output_dir: Path, preset: RoiPreset) -> _Proce
     check = _check(
         unit,
         "whole_resume",
-        "PASS",
-        measured=f"{len(features)} features",
-        threshold=f"{preset.expected_feature_count} features",
-        message="matching completed unit was reused",
+        "WARN" if skipped else "PASS",
+        measured=(
+            f"skipped at {completion.get('mask_voxels')} voxels"
+            if skipped
+            else f"{len(features)} features"
+        ),
+        threshold=(
+            f">={preset.minimum_roi_size} voxels"
+            if skipped
+            else f"{preset.expected_feature_count} features"
+        ),
+        message=(
+            str(completion.get("skip_reason", "matching skipped unit was reused"))
+            if skipped
+            else "matching completed unit was reused"
+        ),
         path=result_path,
     )
     return _ProcessedUnit(
         result=WholeUnitResult(
             unit_key=unit.unit_key,
-            status="resumed",
+            status="resumed-skipped" if skipped else "resumed",
             output_dir=output_dir,
             completion_path=output_dir / "completion.json",
             row=rows[0],
@@ -457,7 +574,9 @@ def _resume_unit(unit: WholeUnit, output_dir: Path, preset: RoiPreset) -> _Proce
         ),
         checks=(check,),
         failure=None,
-        log_lines=(f"[{unit.unit_key}] matching result resumed",),
+        log_lines=(
+            f"[{unit.unit_key}] matching {'skip' if skipped else 'result'} resumed",
+        ),
     )
 
 
@@ -629,7 +748,6 @@ def _completion_matches(
         return False
     expected = {
         "stage": "whole",
-        "status": "complete",
         "unit_key": unit.unit_key,
         "variant": preset.variant,
         "protocol_sha256": protocol.sha256,
@@ -638,9 +756,24 @@ def _completion_matches(
         "input_image": _fingerprint(unit.image_path),
         "input_mask": _fingerprint(unit.mask_path),
         "label": unit.label,
-        "feature_schema_sha256": preset.expected_feature_schema_sha256,
+        "minimum_roi_size": preset.minimum_roi_size,
     }
     if any(data.get(key) != value for key, value in expected.items()):
+        return False
+    status = data.get("status")
+    if status == "complete":
+        if data.get("feature_schema_sha256") != preset.expected_feature_schema_sha256:
+            return False
+        if not isinstance(data.get("mask_voxels"), int) or data["mask_voxels"] < preset.minimum_roi_size:
+            return False
+    elif status == "skipped":
+        if not isinstance(data.get("mask_voxels"), int) or not (
+            0 < data["mask_voxels"] < preset.minimum_roi_size
+        ):
+            return False
+        if not isinstance(data.get("skip_reason"), str) or not data["skip_reason"]:
+            return False
+    else:
         return False
     return data.get("outputs", {}).get("whole_features") == _fingerprint(result_path)
 

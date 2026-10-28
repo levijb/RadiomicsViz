@@ -7,6 +7,7 @@
   "parameter_sha256": "cd2f3e1da1028daaec55b5573b7e2d986b7f34302617452103724d94ff0f942b",
   "requires_preprocessed_input": true,
   "bin_count": 32,
+  "minimum_roi_size": 10,
   "expected_feature_count": 1834,
   "expected_shape_feature_count": 14,
   "expected_diagnostics_count": 37,

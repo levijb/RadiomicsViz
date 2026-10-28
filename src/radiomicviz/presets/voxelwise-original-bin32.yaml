@@ -1,0 +1,79 @@
+# ##############################################################################################
+# PyRadiomics MRI parameter file for T1-weighted voxelwise feature extraction
+# Adapted from precise-habitats CT config for use with intensity-corrected (N4/NU) T1 MRI
+#
+# Key decisions for externally preprocessed data:
+#   - normalize: false  (preprocessing already applied z-score + clip + shift)
+#   - binCount: 32      (use fixed bin count; MRI intensities are not in HU)
+#   - MCC excluded from GLCM (numerically unstable in voxelwise mode)
+#
+# Kernel radius 1 = 3x3x3 neighborhood. For R=3 or R=5, create separate files.
+# ##############################################################################################
+
+imageType:
+  Original: {}
+  
+featureClass:
+  firstorder:
+  glcm:
+    - 'Autocorrelation'
+    - 'ClusterProminence'
+    - 'ClusterShade'
+    - 'ClusterTendency'
+    - 'Contrast'
+    - 'Correlation'
+    - 'DifferenceAverage'
+    - 'DifferenceEntropy'
+    - 'DifferenceVariance'
+    - 'Id'
+    - 'Idm'
+    - 'Idmn'
+    - 'Idn'
+    - 'Imc1'
+    - 'Imc2'
+    - 'InverseVariance'
+    - 'JointAverage'
+    - 'JointEnergy'
+    - 'JointEntropy'
+    - 'MaximumProbability'
+    - 'SumAverage'
+    - 'SumEntropy'
+    - 'SumSquares'
+    # MCC excluded — numerically unstable in voxelwise mode (NaN in eigvals)
+  glrlm:
+  glszm:
+  gldm:
+  ngtdm:
+
+setting:
+  # --- MRI intensity discretization ---
+  # Use binCount (fixed number of bins) instead of binWidth (fixed HU width)
+  # 32 bins is a common choice for MRI radiomics; 64 is also reasonable
+  binCount: 32
+  
+  # --- MRI intensity normalization ---
+  # preprocessing ia alresady run
+  normalize: false
+  
+  # --- Mask handling ---
+  label: 1
+  correctMask: true
+  # Minimum number of voxels required in ROI (skip tiny fragments)
+  minimumROIDimensions: 2
+  minimumROISize: 10
+  
+  # --- Resampling ---
+  # Resample to 1mm isotropic (matches your T1 resolution)
+  #interpolator: 'sitkBSpline'
+  #resampledPixelSpacing: [1, 1, 1]
+  
+  # --- Geometry tolerance ---
+  # Allow small geometry mismatches between image and mask (common after coregistration)
+  geometryTolerance: 1e-3
+
+# --- Voxelwise extraction settings ---
+voxelSetting:
+  kernelRadius: 1         # 3x3x3 voxel neighborhood
+  maskedKernel: true      # Only use voxels within the mask for texture computation
+  initValue: nan          # NaN for voxels outside mask
+  voxelBatch: 2500        # Process in batches (tune based on cluster memory)
