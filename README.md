@@ -131,6 +131,16 @@ conda activate radiomicviz
 The environment file installs SimpleITK 2.5.5 through conda, which avoids asking pip to
 overwrite a legacy distutils installation. After recreation, continue with step 3 above.
 
+If editable package installation reports `No module named 'editables'`, install the
+pinned editable-build helper and retry. Current versions of `environment.yml` install it
+automatically:
+
+```bash
+python -m pip install "editables==0.6"
+python -m pip install --editable . --no-build-isolation --no-deps
+hash -r
+```
+
 This project intentionally pins PyRadiomics 3.0.1. If its build cannot import NumPy or
 other build tools, confirm the environment is active and run the commands in this order:
 

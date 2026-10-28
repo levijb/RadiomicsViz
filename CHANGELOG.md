@@ -44,3 +44,5 @@ This version starts a ground-up rewrite. It is not compatible with the 0.1 serie
   shipped by the package.
 - Conda-managed SimpleITK 2.5.5, avoiding pip replacement failures when a cluster's conda
   configuration supplies the legacy distutils-installed SimpleITK 2.2.1 package.
+- The `editables` build helper required by Hatchling when RadiomicsViz is installed in
+  editable mode without build isolation.
