@@ -8,6 +8,15 @@ This version starts a ground-up rewrite. It is not compatible with the 0.1 serie
 
 ### Added
 
+- Reference habitat clustering from paired T1 and FLAIR voxelwise maps. The package
+  preserves the validated lesion-local median/IQR representation, joint Spearman
+  redundancy filtering, modality block weighting, fixed k=2 primary analysis, adaptive
+  k=1..3 sensitivity analysis, physical-distance label canonicalization and 1 mm
+  geometric comparator. Outputs are atomic and resumable per region, with three uint8
+  masks, seven method-zone index rows, detailed representation QC and authenticated
+  provenance. Regions with unavailable upstream maps at or below 10 voxels are explicit
+  skips; 11–49 voxel regions retain the reference fallback behavior.
+
 - A package-wide 10-voxel minimum lesion size. Combined-mask materialization excludes
   smaller labels/components while preserving their details in provenance, and
   whole-region extraction independently records smaller externally supplied masks as
