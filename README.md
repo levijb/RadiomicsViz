@@ -151,6 +151,24 @@ Voxelwise extraction is substantially more memory- and time-intensive than whole
 extraction. Start with one or two workers and a small representative cohort before raising
 `--jobs` on a cluster.
 
+After both T1 and FLAIR voxelwise units have completed, preview and run habitat
+clustering:
+
+```bash
+radiomicviz habitats \
+  --manifest out/manifest/regions_manifest.csv \
+  --variant b32 \
+  --dry-run
+
+radiomicviz habitats \
+  --manifest out/manifest/regions_manifest.csv \
+  --variant b32 \
+  --jobs 1
+```
+
+Habitat clustering reads many maps at once. Begin with one worker and raise `--jobs` only
+after checking memory use on representative large lesions.
+
 ## Project configuration
 
 `project.yaml` describes only input discovery and the output root:
@@ -366,8 +384,58 @@ Identical reruns resume completed and expected-skipped units. A changed input, p
 protocol, software stack or output fingerprint blocks reuse. `--force` archives the existing
 unit directory before recomputing it.
 
+## Habitat clustering
+
+`radiomicviz habitats` requires a completed voxelwise `b32` unit for both T1 and FLAIR
+for each region. It implements the validated reference methodology as three outputs:
+
+- `fixed_k2`: prespecified two-cluster KMeans, the primary habitat analysis;
+- `adaptive_k1to3`: sensitivity analysis that selects k=1, 2 or 3 using minimum cluster
+  size and silhouette rules; and
+- `geometric_1mm`: a non-radiomic 1 mm shell/core comparator.
+
+For regions with at least 50 voxels, feature handling is entirely region-local. T1 and
+FLAIR maps are median/IQR scaled, non-finite standardized values are set to the local
+median, redundant features are removed jointly at absolute Spearman rho >= 0.90, and each
+retained modality block is weighted by `1/sqrt(number of retained features)`. Fixed and
+adaptive KMeans use this same matrix with seed 42 and 10 initializations. Cluster labels
+are reordered from peripheral to central by mean physical distance from the region
+boundary; the names describe geometry and do not imply rim pathology.
+
+Regions with 11–49 voxels receive the reference one-habitat fallback for the radiomic
+methods and still receive the geometric comparator. Regions with 10 or fewer voxels have
+no upstream voxelwise maps and are recorded as explicit habitat skips. Fixed k=2 genuine
+two-cluster results are preserved even when a cluster is small; `habitat_valid` separately
+records whether both clusters meet the maximum of 10 voxels and 5% of region size.
+
+Each completed region produces three uint8 label masks and exactly seven method/zone
+rows. Outputs are stored beneath:
+
+```text
+<output_root>/subjects/<subject>/sessions/<session>/regions/<region>/habitats/
+  fixed_k2/b32/mask.nii.gz
+  adaptive_k1to3/b32/mask.nii.gz
+  geometric_1mm/mask.nii.gz
+  reference/b32/completion.json
+```
+
+Cohort and invocation reports are written to:
+
+```text
+<output_root>/tables/habitats/b32/habitat_index.csv
+<output_root>/tables/habitats/b32/lesion_qc.csv
+<output_root>/qc/habitats_b32_qc.csv
+<output_root>/qc/habitats_b32_errors.csv
+<output_root>/qc/habitats_b32_run_metadata.json
+<output_root>/qc/logs/habitats_b32.log
+```
+
+The completion record authenticates both voxelwise completion records, the authoritative
+mask, protocol, software, scientific-configuration hash and output masks. Identical reruns
+resume. Partial, changed or corrupted outputs block reuse unless `--force` is supplied.
+
 ## Scope
 
 The current package implements `project init`, optional combined-mask lesion
-materialization, `manifest`, `whole` and `voxelwise`. Habitat clustering, habitat-level
-radiomics and scheduler adapters are later stages.
+materialization, `manifest`, `whole`, `voxelwise` and reference habitat clustering.
+Habitat-level radiomics and scheduler adapters are later stages.

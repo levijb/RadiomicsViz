@@ -17,7 +17,8 @@ The reference workflow is validated for Linux x86-64. The recommended route need
 
 Conda installs Python 3.10.10 and SimpleITK 2.5.5. The pip section of `environment.yml`
 installs the remaining pinned packages, including NumPy 1.26.4, PyWavelets 1.8.0,
-SciPy 1.11.4, pytest and the build tools setuptools, wheel, Hatchling and editables.
+SciPy 1.11.4, scikit-learn 1.1.3, pytest and the build tools setuptools, wheel,
+Hatchling and editables.
 
 ### Pip-only installation
 

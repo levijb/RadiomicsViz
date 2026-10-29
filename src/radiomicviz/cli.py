@@ -14,6 +14,12 @@ from radiomicviz.lesions import (
     build_materialization_plan,
     run_materialization,
 )
+from radiomicviz.habitats import (
+    HabitatPlanError,
+    HabitatStageError,
+    load_habitat_plan,
+    run_habitats,
+)
 from radiomicviz.manifest import build_manifest_preview, write_manifest_outputs
 from radiomicviz.protocols import ProtocolError, load_protocol
 from radiomicviz.policy import MINIMUM_REGION_VOXELS
@@ -483,6 +489,129 @@ def voxelwise_command(
     if not result.valid:
         raise click.ClickException(
             f"voxelwise extraction failed for {result.failed} unit(s); "
+            f"see {result.errors_path}"
+        )
+
+
+@main.command("habitats", context_settings=CONTEXT_SETTINGS)
+@click.option(
+    "--manifest",
+    "manifest_path",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    required=True,
+    help="Canonical regions_manifest.csv used by the completed voxelwise stage.",
+)
+@click.option(
+    "--protocol",
+    "protocol_id",
+    default="lesion-habitat-v1",
+    show_default=True,
+    help="Built-in scientific protocol identifier.",
+)
+@click.option(
+    "--variant",
+    default="b32",
+    show_default=True,
+    help="Voxelwise protocol variant whose paired T1 and FLAIR maps will be clustered.",
+)
+@click.option(
+    "--jobs",
+    type=click.IntRange(min=1),
+    default=1,
+    show_default=True,
+    help="Number of regions to cluster concurrently.",
+)
+@click.option(
+    "--dry-run",
+    is_flag=True,
+    help="Show which regions would run, resume or be blocked without writing files.",
+)
+@click.option(
+    "--force",
+    is_flag=True,
+    help="Archive existing habitat outputs and recompute them instead of resuming.",
+)
+@click.option(
+    "--allow-version-mismatch",
+    is_flag=True,
+    help="Run with non-reference software versions and stamp the deviation in every report.",
+)
+def habitats_command(
+    manifest_path: Path,
+    protocol_id: str,
+    variant: str,
+    jobs: int,
+    dry_run: bool,
+    force: bool,
+    allow_version_mismatch: bool,
+) -> None:
+    """Create fixed, adaptive and geometric habitat masks.
+
+    The reference method jointly uses paired T1 and FLAIR voxelwise feature maps.
+    Both modalities must have completed the selected voxelwise variant first.
+    """
+    try:
+        plan = load_habitat_plan(manifest_path)
+        protocol = load_protocol(protocol_id)
+        result = run_habitats(
+            plan,
+            protocol,
+            variant=variant,
+            jobs=jobs,
+            dry_run=dry_run,
+            force=force,
+            allow_version_mismatch=allow_version_mismatch,
+            progress=_echo_progress,
+        )
+    except (
+        ProtocolError,
+        HabitatPlanError,
+        HabitatStageError,
+        OSError,
+        ValueError,
+    ) as exc:
+        raise click.ClickException(str(exc)) from None
+
+    click.echo("Habitat plan" if dry_run else "Habitat result")
+    click.echo(f"  manifest: {result.manifest_path}")
+    click.echo(f"  output root: {result.output_root}")
+    click.echo(f"  protocol: {result.protocol_id} {result.protocol_version}")
+    click.echo(f"  variant: {result.variant}")
+    click.echo(f"  implementation: {result.implementation_id}")
+    click.echo(f"  scientific config SHA-256: {result.scientific_config_sha256}")
+    click.echo(f"  region units: {len(result.units)}")
+    click.echo(f"  concurrent jobs: {result.jobs}")
+    click.echo(
+        "  reference status: "
+        + ("reference-compatible" if result.reference_compatible else "non-reference")
+    )
+    for deviation in result.reference_deviations:
+        click.echo(f"    - {deviation}")
+    if dry_run:
+        for unit in result.units:
+            click.echo(f"  {unit.status:<14} {unit.unit_key} -> {unit.output_dir}")
+        click.echo("Dry run: no clustering performed and no files written.")
+        if result.blocked:
+            raise click.ClickException(
+                f"{result.blocked} region(s) have outputs without a matching completion "
+                "record; rerun with --force to archive and recompute them"
+            )
+        return
+
+    click.echo(f"  completed: {result.succeeded}")
+    click.echo(f"  resumed: {result.resumed}")
+    click.echo(f"  skipped (voxelwise maps unavailable): {result.skipped}")
+    click.echo(f"  failed: {result.failed}")
+    click.echo(f"  warnings: {result.warnings}")
+    click.echo(f"  habitat index: {result.table_path}")
+    click.echo(f"  lesion QC: {result.qc_table_path}")
+    click.echo(f"  QC: {result.checks_path}")
+    click.echo(f"  errors: {result.errors_path}")
+    click.echo(f"  metadata: {result.metadata_path}")
+    click.echo(f"  log: {result.log_path}")
+    if not result.valid:
+        raise click.ClickException(
+            f"habitat clustering failed for {result.failed} region(s); "
             f"see {result.errors_path}"
         )
 

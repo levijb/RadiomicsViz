@@ -58,6 +58,18 @@ def test_voxelwise_help_exposes_reference_run_controls(runner):
     assert "minimum ROI size" in result.output
 
 
+def test_habitats_help_exposes_reference_run_controls(runner):
+    result = runner.invoke(main, ["habitats", "--help"])
+    assert result.exit_code == 0
+    assert "--manifest" in result.output
+    assert "--protocol" in result.output
+    assert "--variant" in result.output
+    assert "--jobs" in result.output
+    assert "--dry-run" in result.output
+    assert "--force" in result.output
+    assert "--allow-version-mismatch" in result.output
+
+
 def test_manifest_help_explains_preview_and_write(runner):
     result = runner.invoke(main, ["manifest", "--help"])
     assert result.exit_code == 0
