@@ -18,6 +18,7 @@ import numpy as np
 import SimpleITK as sitk
 
 from radiomicviz import __version__
+from radiomicviz._pyradiomics_logging import install_pyradiomics_advisory_filters
 from radiomicviz.protocols import Protocol, VoxelwisePreset
 from radiomicviz.voxelwise.models import (
     VoxelwiseCheck,
@@ -857,6 +858,7 @@ def _default_extractor_factory(parameter_path: Path) -> FeatureExtractor:
         raise VoxelwiseStageError(
             "PyRadiomics is not installed; create the documented validation environment"
         ) from exc
+    install_pyradiomics_advisory_filters()
     sitk.ProcessObject_SetGlobalDefaultNumberOfThreads(1)
     return RadiomicsFeatureExtractor(str(parameter_path))
 

@@ -22,6 +22,9 @@ This version starts a ground-up rewrite. It is not compatible with the 0.1 serie
   `original_glcm_JointAverage` all-nonfinite result: the map is retained with a concise QC
   warning instead of discarding the other 91 valid maps. New completion records include
   per-map finite-voxel counts while existing valid records remain resumable.
+- Exact-message logging filters for the expected PyRadiomics fixed-bin-count advisory and
+  symmetric-GLCM redundancy advisory. All other PyRadiomics and Python warnings remain
+  visible.
 - Reference 32-bin whole-region radiomics with an immutable PyRadiomics preset,
   minimal built-in protocol, concurrent local execution, per-unit resume and
   replacement, cohort exports, QC, errors and provenance.
