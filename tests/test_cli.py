@@ -29,6 +29,9 @@ def test_help_lists_commands(runner, flag):
     assert re.search(r"^\s+manifest\s", result.output, re.MULTILINE)
     assert re.search(r"^\s+whole\s", result.output, re.MULTILINE)
     assert re.search(r"^\s+voxelwise\s", result.output, re.MULTILINE)
+    assert re.search(r"^\s+habitats\s", result.output, re.MULTILINE)
+    assert re.search(r"^\s+habitat-features\s", result.output, re.MULTILINE)
+    assert "Possible incompatible factory load" not in result.output
     assert not re.search(r"^\s+preprocess\s", result.output, re.MULTILINE)
     assert not re.search(r"^\s+site\s", result.output, re.MULTILINE)
 
@@ -43,6 +46,10 @@ def test_whole_help_exposes_reference_run_controls(runner):
     assert "--dry-run" in result.output
     assert "--force" in result.output
     assert "--allow-version-mismatch" in result.output
+    assert "--allow-nonreference" in result.output
+    assert "--summarize" in result.output
+    assert "--summary-dir" in result.output
+    assert "--summary-top-features" in result.output
 
 
 def test_voxelwise_help_exposes_reference_run_controls(runner):
@@ -55,7 +62,11 @@ def test_voxelwise_help_exposes_reference_run_controls(runner):
     assert "--dry-run" in result.output
     assert "--force" in result.output
     assert "--allow-version-mismatch" in result.output
+    assert "--allow-nonreference" in result.output
     assert "minimum ROI size" in result.output
+    assert "--summarize" in result.output
+    assert "--summary-dir" in result.output
+    assert "--summary-top-maps" in result.output
 
 
 def test_habitats_help_exposes_reference_run_controls(runner):
@@ -68,6 +79,26 @@ def test_habitats_help_exposes_reference_run_controls(runner):
     assert "--dry-run" in result.output
     assert "--force" in result.output
     assert "--allow-version-mismatch" in result.output
+    assert "--allow-nonreference" in result.output
+    assert "--summarize" in result.output
+    assert "--summary-dir" in result.output
+    assert "--summary-top-features" in result.output
+
+
+def test_habitat_features_help_exposes_reference_run_controls(runner):
+    result = runner.invoke(main, ["habitat-features", "--help"])
+    assert result.exit_code == 0
+    assert "--manifest" in result.output
+    assert "--protocol" in result.output
+    assert "--variant" in result.output
+    assert "--jobs" in result.output
+    assert "--dry-run" in result.output
+    assert "--force" in result.output
+    assert "--allow-version-mismatch" in result.output
+    assert "--allow-nonreference" in result.output
+    assert "--summarize" in result.output
+    assert "--summary-dir" in result.output
+    assert "--summary-top-features" in result.output
 
 
 def test_manifest_help_explains_preview_and_write(runner):

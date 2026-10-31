@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import glob
 import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -9,8 +10,10 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Callable, Iterable
 
 import numpy as np
+import nibabel as nib
 import SimpleITK as sitk
 
+from radiomicviz._integrity import sha256_file
 from radiomicviz.config._common import SAFE_ID_PATTERN
 from radiomicviz.config.project import ProjectConfig
 from radiomicviz.lesions import MaterializationError, materialized_masks_for_session
@@ -20,6 +23,7 @@ from radiomicviz.policy import MINIMUM_REGION_VOXELS
 REFERENCE_SPACING_MM = (1.0, 1.0, 1.0)
 SPACING_TOLERANCE_MM = 0.001
 GEOMETRY_TOLERANCE = 1e-4
+MAX_INPUT_VOXELS = 256_000_000
 
 
 @dataclass(frozen=True)
@@ -30,6 +34,7 @@ class _ImageInfo:
     spacing: tuple[float, ...]
     origin: tuple[float, ...]
     direction: tuple[float, ...]
+    components: int
 
 
 @dataclass(frozen=True)
@@ -107,11 +112,52 @@ def build_manifest_preview(
     regions_found: set[tuple[str, str, str]] = set()
     reference_status = "reference-compatible"
 
+    modality_names: dict[str, str] = {}
+    for modality in project.modalities:
+        if not _safe_identifier(modality.name):
+            collect.fail(
+                "modality_id_unsafe",
+                "modality name is not a portable identifier",
+                modality=modality.name,
+            )
+        key = modality.name.casefold()
+        if key in modality_names:
+            collect.fail(
+                "duplicate_modality_id",
+                f"modality {modality.name!r} aliases {modality_names[key]!r} on a case-insensitive filesystem",
+                modality=modality.name,
+            )
+        else:
+            modality_names[key] = modality.name
+    if not _safe_identifier(project.regions.region_type):
+        collect.fail(
+            "region_type_unsafe",
+            "regions.region_type is not a portable identifier",
+            measured_value=project.regions.region_type,
+        )
+    if (
+        project.sessions.mode == "single"
+        and not _safe_identifier(project.sessions.default_session_id)
+    ):
+        collect.fail(
+            "session_id_unsafe",
+            "sessions.default_session_id is not a portable identifier",
+            session_id=project.sessions.default_session_id,
+        )
+
     if not data_root.is_dir():
         collect.fail(
             "data_root_missing",
             "data_root does not exist or is not a directory",
             path=str(data_root),
+        )
+
+    if _is_within(resolved_output, data_root):
+        collect.fail(
+            "output_root_inside_data_root",
+            "output_root must be separate from data_root so generated files cannot be rediscovered as inputs",
+            path=str(resolved_output),
+            threshold=f"outside {data_root}",
         )
         return _preview(
             project, data_root, resolved_output, rows, collect, reference_status,
@@ -154,15 +200,16 @@ def build_manifest_preview(
                 threshold="letters, digits, '_', '.', '-' except '.' and '..'",
             )
             continue
-        if subject_id in subject_ids:
+        subject_key = subject_id.casefold()
+        if subject_key in subject_ids:
             collect.fail(
                 "duplicate_subject_id",
-                f"subject_id {subject_id!r} was also produced by {subject_ids[subject_id]}",
+                f"subject_id {subject_id!r} aliases {subject_ids[subject_key]} on a case-insensitive filesystem",
                 subject_id=subject_id,
                 path=str(subject_path),
             )
             continue
-        subject_ids[subject_id] = subject_path
+        subject_ids[subject_key] = subject_path
         subjects_found.add(subject_id)
         collect.check(
             "subject_discovered", "PASS", subject_id=subject_id, path=str(subject_path),
@@ -172,6 +219,7 @@ def build_manifest_preview(
 
     image_cache: dict[Path, _ImageInfo | None] = {}
     mask_cache: dict[Path, tuple[_ImageInfo | None, np.ndarray | None]] = {}
+    fingerprint_cache: dict[Path, tuple[int, str, str]] = {}
     seen_image_paths: dict[tuple[str, str, Path], str] = {}
 
     if progress is not None:
@@ -213,6 +261,14 @@ def build_manifest_preview(
                 collect.fail(
                     "image_dimension", f"expected a 3D image, found {image_info.dimension}D",
                     path=str(image_path), measured_value=str(image_info.dimension), threshold="3", **scope,
+                )
+                continue
+            if image_info.components != 1:
+                collect.fail(
+                    "image_components",
+                    f"expected a scalar image, found {image_info.components} components per pixel",
+                    path=str(image_path), measured_value=str(image_info.components),
+                    threshold="1", **scope,
                 )
                 continue
             collect.check(
@@ -315,14 +371,15 @@ def build_manifest_preview(
                 )
                 continue
             region_scope["region_id"] = region_id
-            if region_id in seen_regions:
+            region_key = region_id.casefold()
+            if region_key in seen_regions:
                 collect.fail(
                     "duplicate_region_id",
-                    f"region_id {region_id!r} was also produced by {seen_regions[region_id]}",
+                    f"region_id {region_id!r} aliases {seen_regions[region_key]} on a case-insensitive filesystem",
                     path=str(mask_path), **region_scope,
                 )
                 continue
-            seen_regions[region_id] = mask_path
+            seen_regions[region_key] = mask_path
 
             mask_info, mask_array = _read_mask(
                 mask_path, mask_cache, collect, "region_mask", **region_scope
@@ -334,6 +391,14 @@ def build_manifest_preview(
                     "mask_dimension", f"expected a 3D mask, found {mask_info.dimension}D",
                     path=str(mask_path), measured_value=str(mask_info.dimension), threshold="3",
                     **region_scope,
+                )
+                continue
+            if mask_info.components != 1:
+                collect.fail(
+                    "mask_components_per_pixel",
+                    f"expected a scalar mask, found {mask_info.components} components per pixel",
+                    path=str(mask_path), measured_value=str(mask_info.components),
+                    threshold="1", **region_scope,
                 )
                 continue
 
@@ -378,6 +443,20 @@ def build_manifest_preview(
                 message=size_message, **region_scope,
             )
 
+            coordinates = np.argwhere(foreground)
+            extents = coordinates.max(axis=0) - coordinates.min(axis=0) + 1
+            roi_dimensions = int(np.count_nonzero(extents > 1))
+            collect.check(
+                "region_dimensions", "PASS" if roi_dimensions >= 2 else "WARN",
+                path=str(mask_path), measured_value=str(roi_dimensions), threshold=">=2",
+                message=(
+                    "region spans at least two dimensions"
+                    if roi_dimensions >= 2
+                    else "region is one-dimensional and will be skipped by radiomics extraction"
+                ),
+                **region_scope,
+            )
+
             components_6 = _component_count(foreground, fully_connected=False)
             components_26 = _component_count(foreground, fully_connected=True)
             collect.check(
@@ -406,8 +485,13 @@ def build_manifest_preview(
             for modality_name, (image_path, image_info) in images.items():
                 modality_scope = {**region_scope, "modality": modality_name}
                 if not _geometry_matches(image_info, mask_info):
+                    differences = ", ".join(
+                        _geometry_differences(image_info, mask_info)
+                    )
                     collect.fail(
-                        "mask_image_geometry", "region mask geometry does not match the image",
+                        "mask_image_geometry",
+                        "region mask geometry does not match the image "
+                        f"({differences})",
                         path=str(mask_path), measured_value=_geometry_text(mask_info),
                         threshold=_geometry_text(image_info), **modality_scope,
                     )
@@ -417,8 +501,8 @@ def build_manifest_preview(
                     measured_value=_geometry_text(mask_info), threshold=_geometry_text(image_info),
                     message="mask and source image geometry match", **modality_scope,
                 )
-                image_stat = _fingerprint(image_path)
-                mask_stat = _fingerprint(mask_path)
+                image_stat = _fingerprint(image_path, fingerprint_cache)
+                mask_stat = _fingerprint(mask_path, fingerprint_cache)
                 rows.append(
                     ManifestRow(
                         subject_id=session.subject_id, session_id=session.session_id,
@@ -427,7 +511,9 @@ def build_manifest_preview(
                         mask_path=str(mask_path), label=mask_label,
                         space_id=project.space_id,
                         image_size_bytes=image_stat[0], image_mtime_utc=image_stat[1],
+                        image_sha256=image_stat[2],
                         mask_size_bytes=mask_stat[0], mask_mtime_utc=mask_stat[1],
+                        mask_sha256=mask_stat[2],
                     )
                 )
                 region_rows += 1
@@ -460,6 +546,32 @@ def _discover_sessions(
     project: ProjectConfig, subject_path: Path, subject_id: str, collect: _Collector,
 ) -> list[_Session]:
     if project.sessions.mode == "single":
+        patterns = [
+            *(modality.image_pattern for modality in project.modalities),
+            project.regions.mask_pattern,
+        ]
+        if any("{session}" in pattern for pattern in patterns):
+            selected = str(project.sessions.default_session_id)
+            other_directories = sorted(
+                path.name
+                for path in subject_path.iterdir()
+                if path.is_dir() and path.name != selected
+            )
+            if other_directories:
+                collect.check(
+                    "additional_sessions_ignored",
+                    "WARN",
+                    subject_id=subject_id,
+                    session_id=selected,
+                    path=str(subject_path),
+                    measured_value=", ".join(other_directories),
+                    threshold="one configured session per subject",
+                    message=(
+                        "sessions.mode is 'single', so only default_session_id is used; "
+                        "review the other directories and use sessions.mode 'discovered' "
+                        "if they contain additional sessions"
+                    ),
+                )
         return [_Session(subject_id, subject_path.name, project.sessions.default_session_id,
                          project.sessions.default_session_id)]
     paths = _glob(
@@ -495,13 +607,14 @@ def _discover_sessions(
                 threshold="letters, digits, '_', '.', '-' except '.' and '..'",
             )
             continue
-        if session_id in seen:
+        session_key = session_id.casefold()
+        if session_key in seen:
             collect.fail(
-                "duplicate_session_id", f"session_id {session_id!r} was also produced by {seen[session_id]}",
+                "duplicate_session_id", f"session_id {session_id!r} aliases {seen[session_key]} on a case-insensitive filesystem",
                 subject_id=subject_id, session_id=session_id, path=str(path),
             )
             continue
-        seen[session_id] = path
+        seen[session_key] = path
         result.append(_Session(subject_id, subject_path.name, session_id, path.name))
         collect.check(
             "session_discovered", "PASS", subject_id=subject_id, session_id=session_id,
@@ -513,7 +626,10 @@ def _discover_sessions(
 def _match_pattern(
     root: Path, pattern: str, session: _Session, collect: _Collector, check_id: str, **scope: str,
 ) -> list[Path]:
-    expanded = pattern.format(subject=session.subject_name, session=session.session_name)
+    expanded = pattern.format(
+        subject=glob.escape(session.subject_name),
+        session=glob.escape(session.session_name),
+    )
     return _glob(root, expanded, collect, check_id, **scope)
 
 
@@ -525,7 +641,19 @@ def _glob(root: Path, pattern: str, collect: _Collector, check_id: str, **scope:
         )
         return []
     try:
-        return sorted((path.resolve() for path in root.glob(pattern)), key=lambda path: str(path).casefold())
+        resolved_root = root.resolve()
+        matches: list[Path] = []
+        for candidate in root.glob(pattern):
+            resolved = candidate.resolve()
+            if not _is_within(resolved, resolved_root):
+                collect.fail(
+                    f"{check_id}_outside_root",
+                    "matched path resolves outside its allowed input root",
+                    path=str(resolved), threshold=f"inside {resolved_root}", **scope,
+                )
+                continue
+            matches.append(resolved)
+        return sorted(matches, key=lambda path: str(path).casefold())
     except (OSError, ValueError) as exc:
         collect.fail(
             f"{check_id}_pattern", f"pattern could not be evaluated ({exc})", path=pattern, **scope,
@@ -545,7 +673,21 @@ def _extract_id(pattern: str, group: str, name: str) -> str | None:
 
 
 def _safe_identifier(value: str) -> bool:
-    return value not in {".", ".."} and SAFE_ID_PATTERN.fullmatch(value) is not None
+    if (
+        value in {".", ".."}
+        or "__" in value
+        or value.startswith("-")
+        or value.endswith((".", " "))
+        or not value.strip(".")
+        or SAFE_ID_PATTERN.fullmatch(value) is None
+    ):
+        return False
+    stem = value.split(".", 1)[0].casefold()
+    return stem not in {
+        "con", "prn", "aux", "nul",
+        *(f"com{index}" for index in range(1, 10)),
+        *(f"lpt{index}" for index in range(1, 10)),
+    }
 
 
 def _wrong_match_count(
@@ -579,6 +721,9 @@ def _read_image_info(
         collect.fail(f"{kind}_unreadable", f"SimpleITK could not read the image ({exc})", path=str(path), **scope)
         cache[path] = None
         return None
+    if not _validate_voxel_data(path, image, collect, kind, **scope):
+        cache[path] = None
+        return None
     info = _info(path, image)
     cache[path] = info
     return info
@@ -601,6 +746,9 @@ def _read_mask(
         collect.fail(f"{kind}_unreadable", f"SimpleITK could not read the mask ({exc})", path=str(path), **scope)
         cache[path] = (None, None)
         return cache[path]
+    if not _validate_voxel_data(path, image, collect, kind, **scope):
+        cache[path] = (None, None)
+        return cache[path]
     cache[path] = (_info(path, image), array)
     return cache[path]
 
@@ -612,6 +760,7 @@ def _info(path: Path, image: sitk.Image) -> _ImageInfo:
         spacing=tuple(float(value) for value in image.GetSpacing()),
         origin=tuple(float(value) for value in image.GetOrigin()),
         direction=tuple(float(value) for value in image.GetDirection()),
+        components=int(image.GetNumberOfComponentsPerPixel()),
     )
 
 
@@ -624,10 +773,30 @@ def _geometry_matches(left: _ImageInfo, right: _ImageInfo) -> bool:
     )
 
 
+def _geometry_differences(left: _ImageInfo, right: _ImageInfo) -> tuple[str, ...]:
+    differences: list[str] = []
+    if left.dimension != right.dimension:
+        differences.append("dimension")
+    if left.size != right.size:
+        differences.append("size")
+    if not np.allclose(left.spacing, right.spacing, atol=GEOMETRY_TOLERANCE, rtol=0):
+        differences.append("spacing")
+    if not np.allclose(left.origin, right.origin, atol=GEOMETRY_TOLERANCE, rtol=0):
+        differences.append("origin")
+    if not np.allclose(left.direction, right.direction, atol=GEOMETRY_TOLERANCE, rtol=0):
+        differences.append("direction")
+    return tuple(differences) or ("unknown property",)
+
+
 def _spacing_is_reference(spacing: Iterable[float]) -> bool:
     values = tuple(spacing)
     return len(values) == 3 and bool(
-        np.allclose(values, REFERENCE_SPACING_MM, atol=SPACING_TOLERANCE_MM, rtol=0)
+        np.allclose(
+            values,
+            REFERENCE_SPACING_MM,
+            atol=SPACING_TOLERANCE_MM + 1e-6,
+            rtol=0,
+        )
     )
 
 
@@ -638,10 +807,74 @@ def _component_count(mask: np.ndarray, *, fully_connected: bool) -> int:
     return int(array.max()) if array.size else 0
 
 
-def _fingerprint(path: Path) -> tuple[int, str]:
+def _fingerprint(
+    path: Path, cache: dict[Path, tuple[int, str, str]]
+) -> tuple[int, str, str]:
+    if path in cache:
+        return cache[path]
     stat = path.stat()
     timestamp = datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat()
-    return stat.st_size, timestamp
+    result = (stat.st_size, timestamp, sha256_file(path))
+    cache[path] = result
+    return result
+
+
+def _validate_voxel_data(
+    path: Path,
+    image: sitk.Image,
+    collect: _Collector,
+    kind: str,
+    **scope: str,
+) -> bool:
+    """Reject truncated or non-finite inputs before ITK can sanitise them."""
+    try:
+        if path.name.casefold().endswith((".nii", ".nii.gz")):
+            loaded = nib.load(str(path))
+            voxel_count = int(np.prod(loaded.shape, dtype=np.int64))
+            if voxel_count > MAX_INPUT_VOXELS:
+                collect.fail(
+                    f"{kind}_too_large",
+                    "image header exceeds the manifest safety limit",
+                    path=str(path), measured_value=str(voxel_count),
+                    threshold=f"<={MAX_INPUT_VOXELS} voxels", **scope,
+                )
+                return False
+            values = np.asanyarray(loaded.dataobj)
+        else:
+            voxel_count = int(np.prod(image.GetSize(), dtype=np.int64))
+            if voxel_count > MAX_INPUT_VOXELS:
+                collect.fail(
+                    f"{kind}_too_large",
+                    "image header exceeds the manifest safety limit",
+                    path=str(path), measured_value=str(voxel_count),
+                    threshold=f"<={MAX_INPUT_VOXELS} voxels", **scope,
+                )
+                return False
+            values = np.asarray(sitk.GetArrayViewFromImage(image))
+    except (OSError, EOFError, ValueError) as exc:
+        collect.fail(
+            f"{kind}_unreadable",
+            f"input integrity check failed ({exc})",
+            path=str(path), **scope,
+        )
+        return False
+    nonfinite = int(values.size - np.count_nonzero(np.isfinite(values)))
+    if nonfinite:
+        collect.fail(
+            f"{kind}_nonfinite",
+            "input contains NaN or infinite voxel values",
+            path=str(path), measured_value=str(nonfinite), threshold="0", **scope,
+        )
+        return False
+    return True
+
+
+def _is_within(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+        return True
+    except ValueError:
+        return False
 
 
 def _resolve_root(value: str, base: Path) -> Path:

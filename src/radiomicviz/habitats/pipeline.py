@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import platform
@@ -20,6 +19,8 @@ import SimpleITK as sitk
 from scipy.ndimage import label as connected_component_label
 
 from radiomicviz import __version__
+from radiomicviz._platform import platform_identifier, reference_platform_deviation
+from radiomicviz._integrity import file_fingerprint, fingerprint_matches
 from radiomicviz.habitats.models import (
     HabitatCheck,
     HabitatFailure,
@@ -117,6 +118,8 @@ def run_habitats(
     preset = protocol.voxelwise_preset(variant)
     actual_software = dict(software or _software_versions())
     deviations = list(_version_deviations(protocol.expected_software, actual_software))
+    if platform_issue := reference_platform_deviation(actual_software):
+        deviations.append(platform_issue)
     for name, expected in {"scipy": "1.11.4", "scikit-learn": "1.1.3"}.items():
         if actual_software.get(name) != expected:
             deviations.append(
@@ -130,7 +133,7 @@ def run_habitats(
         listing = "\n".join(f"  - {item}" for item in deviations)
         raise HabitatStageError(
             "software or input state does not match the reference protocol:\n"
-            f"{listing}\nUse --allow-version-mismatch only for an explicitly non-reference run."
+            f"{listing}\nUse --allow-nonreference only for an explicitly non-reference run."
         )
 
     started = _utc_now()
@@ -273,6 +276,45 @@ def _plan_unit(
             failure,
             (f"BLOCKED {unit.unit_key}: {failure.message}",),
         )
+    missing_inputs = [
+        unit.voxelwise_dir(plan.output_root, preset.variant, modality)
+        / "completion.json"
+        for modality in ("T1", "FLAIR")
+        if not (
+            unit.voxelwise_dir(plan.output_root, preset.variant, modality)
+            / "completion.json"
+        ).is_file()
+    ]
+    if missing_inputs:
+        message = (
+            "voxelwise completion is missing; run 'radiomicviz voxelwise' for this "
+            "manifest and variant before habitat clustering: "
+            + "; ".join(str(path) for path in missing_inputs)
+        )
+        failure = _failure(
+            unit,
+            "habitat_voxelwise_input_missing",
+            message,
+            missing_inputs[0],
+        )
+        return _ProcessedUnit(
+            HabitatUnitResult(
+                unit.unit_key,
+                "blocked",
+                unit.output_dir(plan.output_root),
+                None,
+                message=message,
+            ),
+            (_check(
+                unit,
+                "habitat_input_maps",
+                "FAIL",
+                message,
+                missing_inputs[0],
+            ),),
+            failure,
+            (f"BLOCKED {unit.unit_key}: {message}",),
+        )
     status = "replace" if force and _unit_outputs_exist(unit, plan.output_root, preset.variant) else "planned"
     return _ProcessedUnit(
         HabitatUnitResult(unit.unit_key, status, unit.output_dir(plan.output_root), None),
@@ -303,6 +345,7 @@ def _process_unit(task: _Task) -> _ProcessedUnit:
                 "subject_id": unit.subject_id,
                 "session_id": unit.session_id,
                 "region_id": unit.region_id,
+                "reference_status": _task_reference_status(task),
                 "n_voxels": int(inputs["mask_voxels"]),
                 "representation_status": "not_available_voxelwise_stage_skipped",
             }
@@ -336,6 +379,13 @@ def _process_unit(task: _Task) -> _ProcessedUnit:
             )
         staged: dict[str, Path] = {}
         finals = _mask_paths(unit, plan.output_root, preset.variant)
+        staged_source: dict[str, Path] = {}
+        source_finals = _source_grid_mask_paths(
+            unit, plan.output_root, preset.variant
+        )
+        source_reference = sitk.ReadImage(str(unit.mask_path))
+        source_values = sitk.GetArrayViewFromImage(source_reference)
+        source_voxels = int(np.count_nonzero(source_values == unit.label))
         for method in METHODS:
             method_dir = work_dir / method
             method_dir.mkdir()
@@ -345,9 +395,23 @@ def _process_unit(task: _Task) -> _ProcessedUnit:
             sitk.WriteImage(image, str(staged_path))
             _validate_output_mask(staged_path, reference, mask_voxels, method)
             staged[method] = staged_path
+            source_path = method_dir / "mask_source_grid.nii.gz"
+            source_image = sitk.Resample(
+                image,
+                source_reference,
+                sitk.Transform(),
+                sitk.sitkNearestNeighbor,
+                0,
+                sitk.sitkUInt8,
+            )
+            sitk.WriteImage(source_image, str(source_path))
+            _validate_output_mask(
+                source_path, source_reference, source_voxels, method
+            )
+            staged_source[method] = source_path
         if task.force:
             archived.extend(_archive_outputs(unit, plan.output_root, preset.variant))
-        _promote_masks(staged, finals)
+        _promote_masks(staged, finals, staged_source, source_finals)
         rows = tuple(
             {
                 "subject_id": unit.subject_id,
@@ -356,7 +420,11 @@ def _process_unit(task: _Task) -> _ProcessedUnit:
                 "region_type": unit.region_type,
                 "variant": preset.variant,
                 "implementation_id": "reference",
+                "reference_status": _task_reference_status(task),
                 "mask_path": str(finals[str(row["method"])].resolve()),
+                "source_grid_mask_path": str(
+                    source_finals[str(row["method"])].resolve()
+                ),
                 **_json_safe(row),
             }
             for row in computation.rows
@@ -365,6 +433,7 @@ def _process_unit(task: _Task) -> _ProcessedUnit:
             "subject_id": unit.subject_id,
             "session_id": unit.session_id,
             "region_id": unit.region_id,
+            "reference_status": _task_reference_status(task),
             **_json_safe(inputs["mask_qc"]),
             **_json_safe(computation.qc),
         }
@@ -379,6 +448,10 @@ def _process_unit(task: _Task) -> _ProcessedUnit:
                 "qc": qc,
                 "outputs": {
                     method: _fingerprint(path) for method, path in finals.items()
+                },
+                "source_grid_outputs": {
+                    method: _fingerprint(path)
+                    for method, path in source_finals.items()
                 },
             }
         )
@@ -402,11 +475,12 @@ def _process_unit(task: _Task) -> _ProcessedUnit:
     except Exception as exc:
         failure = _failure(unit, "habitat_clustering_failed", f"{type(exc).__name__}: {exc}", work_dir)
         checks.append(_check(unit, "habitat_clustering", "FAIL", failure.message, work_dir))
+        shutil.rmtree(work_dir, ignore_errors=True)
         return _ProcessedUnit(
             HabitatUnitResult(unit.unit_key, "failed", unit.output_dir(plan.output_root), None, message=failure.message),
             tuple(checks),
             failure,
-            (f"FAIL {unit.unit_key}: {failure.message}; staging retained at {work_dir}",),
+            (f"FAIL {unit.unit_key}: {failure.message}; failed staging removed",),
         )
 
 
@@ -562,7 +636,7 @@ def _validated_voxelwise_completion(
         raise HabitatStageError(f"voxelwise completion has invalid outputs: {path}")
     for name in preset.expected_map_names:
         map_path = path.parent / f"{name}.nrrd"
-        if outputs.get(name) != _voxelwise_fingerprint(map_path):
+        if not fingerprint_matches(outputs.get(name), map_path):
             raise HabitatStageError(f"voxelwise map changed after completion: {map_path}")
     return data
 
@@ -593,6 +667,11 @@ def _upstream_software_deviations(
                 deviations.append(
                     f"upstream voxelwise unit {unit.unit_key}/{modality}: {item}"
                 )
+            if platform_issue := reference_platform_deviation(upstream):
+                deviations.append(
+                    f"upstream voxelwise unit {unit.unit_key}/{modality}: "
+                    f"{platform_issue}"
+                )
     return tuple(deviations)
 
 
@@ -604,7 +683,7 @@ def _completion_base(
 ) -> dict[str, object]:
     unit, plan, protocol, preset = task.unit, task.plan, task.protocol, task.preset
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "stage": "habitats",
         "status": status,
         "unit_key": unit.unit_key,
@@ -620,7 +699,10 @@ def _completion_base(
         "scientific_config": dict(SCIENTIFIC_CONFIG),
         "scientific_config_sha256": SCIENTIFIC_CONFIG_SHA256,
         "software": dict(task.software),
-        "input_mask": _fingerprint(unit.mask_path),
+        "reference_status": _task_reference_status(task),
+        "input_mask": _fingerprint(
+            unit.mask_path, sha256=unit.t1_unit.mask_sha256
+        ),
         "input_voxelwise_completions": {
             modality: _fingerprint(unit.voxelwise_dir(plan.output_root, preset.variant, modality) / "completion.json")
             for modality in ("T1", "FLAIR")
@@ -644,8 +726,10 @@ def _completion_matches(
         return False
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
-        input_records = {
-            modality: _fingerprint(unit.voxelwise_dir(plan.output_root, preset.variant, modality) / "completion.json")
+        input_paths = {
+            modality: unit.voxelwise_dir(
+                plan.output_root, preset.variant, modality
+            ) / "completion.json"
             for modality in ("T1", "FLAIR")
         }
     except (OSError, json.JSONDecodeError):
@@ -659,26 +743,52 @@ def _completion_matches(
         "voxelwise_preset_sha256": preset.parameter_sha256,
         "scientific_config_sha256": SCIENTIFIC_CONFIG_SHA256,
         "software": dict(software),
-        "input_mask": _fingerprint(unit.mask_path),
-        "input_voxelwise_completions": input_records,
         "label": unit.label,
     }
     if any(data.get(key) != value for key, value in expected.items()):
+        return False
+    if not fingerprint_matches(
+        data.get("input_mask"),
+        unit.mask_path,
+        expected_sha256=unit.t1_unit.mask_sha256,
+    ):
+        return False
+    input_records = data.get("input_voxelwise_completions")
+    if not isinstance(input_records, Mapping) or any(
+        not fingerprint_matches(input_records.get(modality), input_paths[modality])
+        for modality in ("T1", "FLAIR")
+    ):
         return False
     if data.get("status") == "skipped":
         return (
             data.get("outputs") == {}
             and data.get("rows") == []
             and not any(path_value.exists() for path_value in _mask_paths(unit, plan.output_root, preset.variant).values())
+            and not any(
+                path_value.exists()
+                for path_value in _source_grid_mask_paths(
+                    unit, plan.output_root, preset.variant
+                ).values()
+            )
         )
     if data.get("status") != "complete" or len(data.get("rows", [])) != 7:
         return False
     outputs = data.get("outputs")
+    source_outputs = data.get("source_grid_outputs")
     finals = _mask_paths(unit, plan.output_root, preset.variant)
+    source_finals = _source_grid_mask_paths(unit, plan.output_root, preset.variant)
     try:
-        return isinstance(outputs, dict) and all(
-            outputs.get(method) == _fingerprint(path_value)
-            for method, path_value in finals.items()
+        return (
+            isinstance(outputs, dict)
+            and isinstance(source_outputs, dict)
+            and all(
+                fingerprint_matches(outputs.get(method), path_value)
+                for method, path_value in finals.items()
+            )
+            and all(
+                fingerprint_matches(source_outputs.get(method), path_value)
+                for method, path_value in source_finals.items()
+            )
         )
     except OSError:
         return False
@@ -693,6 +803,15 @@ def _mask_paths(unit: HabitatUnit, output_root: Path, variant: str) -> dict[str,
     }
 
 
+def _source_grid_mask_paths(
+    unit: HabitatUnit, output_root: Path, variant: str
+) -> dict[str, Path]:
+    return {
+        method: path.with_name("mask_source_grid.nii.gz")
+        for method, path in _mask_paths(unit, output_root, variant).items()
+    }
+
+
 def _completion_path(unit: HabitatUnit, output_root: Path, variant: str) -> Path:
     return unit.output_dir(output_root) / "reference" / variant / "completion.json"
 
@@ -700,6 +819,9 @@ def _completion_path(unit: HabitatUnit, output_root: Path, variant: str) -> Path
 def _unit_outputs_exist(unit: HabitatUnit, output_root: Path, variant: str) -> bool:
     return _completion_path(unit, output_root, variant).exists() or any(
         path.exists() for path in _mask_paths(unit, output_root, variant).values()
+    ) or any(
+        path.exists()
+        for path in _source_grid_mask_paths(unit, output_root, variant).values()
     )
 
 
@@ -717,13 +839,24 @@ def _archive_outputs(unit: HabitatUnit, output_root: Path, variant: str) -> list
     return archived
 
 
-def _promote_masks(staged: Mapping[str, Path], finals: Mapping[str, Path]) -> None:
+def _promote_masks(
+    staged: Mapping[str, Path],
+    finals: Mapping[str, Path],
+    staged_source: Mapping[str, Path],
+    source_finals: Mapping[str, Path],
+) -> None:
     for method in METHODS:
         final = finals[method]
         final.parent.mkdir(parents=True, exist_ok=True)
         if final.exists():
             raise HabitatStageError(f"refusing to replace existing habitat mask without --force: {final}")
         os.replace(staged[method], final)
+        source_final = source_finals[method]
+        if source_final.exists():
+            raise HabitatStageError(
+                f"refusing to replace existing source-grid habitat mask without --force: {source_final}"
+            )
+        os.replace(staged_source[method], source_final)
 
 
 def _validate_output_mask(path: Path, reference: sitk.Image, n_voxels: int, method: str) -> None:
@@ -785,6 +918,7 @@ def _software_versions() -> dict[str, str]:
     except ImportError as exc:
         raise HabitatStageError(f"habitat dependency is missing: {exc.name}") from exc
     return {
+        "platform": platform_identifier(),
         "python": platform.python_version(),
         "pyradiomics": str(radiomics.__version__).lstrip("v"),
         "numpy": np.__version__,
@@ -803,27 +937,17 @@ def _version_deviations(expected: Mapping[str, str], actual: Mapping[str, str]) 
     )
 
 
-def _fingerprint(path: Path) -> dict[str, object]:
-    stat = path.stat()
-    return {"path": str(path.resolve()), "size_bytes": stat.st_size, "mtime_utc": datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat(), "sha256": _sha256(path)}
+def _task_reference_status(task: _Task) -> str:
+    return (
+        "reference-compatible"
+        if task.plan.manifest_reference_status == "reference-compatible"
+        and not _version_deviations(task.protocol.expected_software, task.software)
+        else "non-reference"
+    )
 
 
-def _voxelwise_fingerprint(path: Path) -> dict[str, object]:
-    """Match the upstream voxelwise completion-record fingerprint schema."""
-    stat = path.stat()
-    return {
-        "path": str(path.resolve()),
-        "size_bytes": stat.st_size,
-        "mtime_utc": datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat(),
-    }
-
-
-def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for block in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(block)
-    return digest.hexdigest()
+def _fingerprint(path: Path, *, sha256: str | None = None) -> dict[str, object]:
+    return file_fingerprint(path, sha256=sha256)
 
 
 def _json_safe(value: object) -> object:

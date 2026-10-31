@@ -1,191 +1,124 @@
 # RadiomicsViz
 
-RadiomicsViz is a manifest-driven MRI radiomics package for studies with either separate
-binary lesion masks or one combined lesion mask per subject/session. The current release
-provides deterministic input discovery, safe lesion-mask materialization and reference
-whole-region and voxelwise PyRadiomics extraction.
+RadiomicsViz is a manifest-driven MRI radiomics pipeline. It uses a fixed, versioned
+PyRadiomics protocol to produce whole-region feature tables, per-voxel feature maps,
+T1/FLAIR habitat masks, and whole-region features for each habitat zone. Every stage
+writes QC records and resumable completion files.
+
+Status: pre-release `0.3.0.dev0`. The reference environment targets Linux x86-64.
 
 ## Input contract
 
-RadiomicsViz does not prepare or modify images before extraction. Every configured image
-must already be:
+RadiomicsViz does not perform brain extraction, bias correction, intensity normalization,
+or registration. Inputs must already be analysis-ready. For every subject, and optionally
+every session, provide:
 
-- the final image intended for analysis;
-- co-registered with its region masks;
-- three-dimensional and readable by SimpleITK; and
-- in the intended analysis space and voxel spacing.
+- one readable 3-D image per modality;
+- region masks on the same voxel grid as the images;
+- one folder per subject under `data_root` (a flat folder is not supported).
 
-The package checks image/mask geometry and spacing but does not correct them. PyRadiomics
-can still apply operations explicitly configured in its parameter file. The frozen
-reference preset currently requests 1 x 1 x 1 mm resampling and filtered image variants;
-those are extraction settings, not a separate image-preparation stage.
+Masks may be supplied as one binary file per region, one integer-labeled map, or one
+combined binary mask. The latter two forms are materialized into separate binary masks
+before the manifest is written.
 
-## Lesion-mask input choices
+The manifest stage checks readability, finite image values, mask labels, geometry, and
+voxel spacing. The reference input spacing is `1.0 +/- 0.001 mm` per axis. Separately,
+the frozen whole-region preset asks PyRadiomics to resample to 1 mm with B-spline
+interpolation; that preset operation is part of the validated feature definition.
 
-The lesion input workflow is selected by `regions.mode` in `project.yaml`:
+## Pipeline
 
-- `per_region_masks` reads masks that are already separated, with one binary file per
-  lesion. No splitting command is needed.
-- `labeled_map` reads one combined integer map. Every positive integer label is preserved
-  as one lesion when it contains at least 10 voxels.
-- `connected_components` reads one combined binary mask and creates one lesion for each
-  connected foreground component. Materialized lesions are numbered by descending voxel
-  count, so the largest is `lesion_001`; equal-sized components retain their deterministic
-  source-component order. The YAML must explicitly choose 6- or 26-connectivity.
+| Stage | Command | Main output |
+| --- | --- | --- |
+| Configure | `radiomicviz project init` | Commented `project.yaml` template |
+| Separate combined masks | `radiomicviz lesions materialize` | One binary mask per retained region |
+| Validate inputs | `radiomicviz manifest [--write]` | `manifest/regions_manifest.csv` |
+| Whole-region radiomics | `radiomicviz whole` | One feature vector per region and modality |
+| Voxelwise radiomics | `radiomicviz voxelwise` | 92 feature maps per region and modality |
+| Habitat clustering | `radiomicviz habitats` | Fixed, adaptive, and geometric habitat masks |
+| Habitat-zone radiomics | `radiomicviz habitat-features` | One feature vector per zone and modality |
 
-The package-wide minimum lesion size is 10 voxels. Combined-mask labels or connected
-components below this threshold are not materialized; their source labels/component IDs
-and voxel counts remain recorded in the materialization completion and provenance files.
-Exactly 10 voxels is eligible.
+Work is resumable by unit. Most units are one region-modality pair; `habitats` uses one
+region, and `habitat-features` uses one region, method, and modality.
 
-Connected-components splitting cannot separate lesions that touch; touching foreground
-voxels remain one lesion. RadiomicsViz does not apply watershed or invent boundaries.
-The combined source files are never modified. Materialized binary masks are written under
-`output_root/materialized_regions/` with source and output hashes, voxel counts and a
-completion record.
+Common options are:
 
-## Installation
+- `--dry-run` to show the plan without running the stage;
+- `--jobs N` to process independent units concurrently;
+- `--force` to archive incompatible existing units and recompute them;
+- `--summarize` to create a read-only exploratory report for an existing run;
+- `--variant b32`, the only protocol variant in this release.
 
-### From source with conda (recommended)
+## Install
 
-The reference workflow is validated for Linux x86-64. Conda is recommended because it
-installs the exact Python and compiled-library versions used by the reference protocol.
-
-1. Clone the repository and enter it:
-
-   ```bash
-   git clone https://github.com/levijb/RadiomicsViz.git
-   cd RadiomicsViz
-   ```
-
-2. Create and activate the pinned environment:
-
-   ```bash
-   conda env create --file environment.yml
-   conda activate radiomicviz
-   ```
-
-3. Install PyRadiomics and RadiomicsViz:
-
-   ```bash
-   python -m pip install "pyradiomics==3.0.1" --no-build-isolation --no-deps
-   python -m pip install --editable . --no-build-isolation --no-deps
-   python -m pip check
-   radiomicviz --version
-   ```
-
-PyRadiomics is installed after environment creation so its build can use the pinned NumPy,
-setuptools and wheel already present. `--no-deps` prevents pip from replacing the versions
-fixed by `environment.yml`.
-
-For recovery steps, troubleshooting and further details, see
-[INSTALLATION_DETAILS.md](INSTALLATION_DETAILS.md).
-
-## Quick start
-
-Create a project template:
+Follow [INSTALLATION_DETAILS.md](INSTALLATION_DETAILS.md). After installation:
 
 ```bash
-radiomicviz project init
+python -m pip check
+radiomicviz --version
 ```
 
-Edit `project.yaml` so its image patterns point directly to the final analysis images and
-choose one of the lesion modes above.
+## Shortest end-to-end example
 
-For already separated masks, proceed directly to the manifest preview. For a combined
-mask, first preview and then run materialization:
+Work in a study folder outside the repository. This example assumes the default input
+form: one binary file per region.
+
+```bash
+mkdir my-study && cd my-study
+radiomicviz project init
+# Edit project.yaml: set data_root and adjust the subject, image, and mask patterns.
+# output_root defaults to ./out.
+radiomicviz manifest --project project.yaml
+radiomicviz manifest --project project.yaml --write
+
+M="--manifest out/manifest/regions_manifest.csv"
+radiomicviz whole $M --dry-run
+radiomicviz whole $M --jobs 2
+radiomicviz voxelwise $M --jobs 2
+radiomicviz habitats $M --jobs 1
+radiomicviz habitat-features $M --jobs 2
+radiomicviz habitat-features $M --summarize
+```
+
+For `labeled_map` or `connected_components` input, run this before `manifest`:
 
 ```bash
 radiomicviz lesions materialize --project project.yaml --dry-run
 radiomicviz lesions materialize --project project.yaml
 ```
 
-The second command safely resumes an identical completed materialization. If its source or
-settings changed, it stops instead of replacing output; use `--force` only after reviewing
-the change. Then preview discovery and QC:
+Start with one or two workers on a small cohort and measure memory before scaling up.
+Habitat clustering loads paired T1 and FLAIR map sets for a region and should start with
+`--jobs 1`.
 
-```bash
-radiomicviz manifest --project project.yaml
-```
+## Configure project.yaml
 
-If the preview is correct, write the canonical manifest:
+`project.yaml` describes input discovery and the output root; scientific settings remain
+inside the built-in protocol.
 
-```bash
-radiomicviz manifest --project project.yaml --write
-```
+| Key | Meaning |
+| --- | --- |
+| `data_root` | Folder containing one folder per subject |
+| `output_root` | Folder for all generated files; keep it outside `data_root` |
+| `subjects` | Folder glob and regex containing a `(?P<subject>...)` group |
+| `sessions.mode` | `single` or `discovered` |
+| `modalities.<name>.image_pattern` | Exactly one analysis-ready image per subject/session |
+| `regions.mode` | `per_region_masks`, `labeled_map`, or `connected_components` |
+| `regions.mask_pattern` | Separated mask glob or one combined-mask path |
+| `allow_nonreference_spacing` | Permit non-1-mm input and mark the manifest non-reference |
 
-Preview whole-region extraction:
+Patterns are relative to `data_root`, use forward slashes, and may contain `{subject}`.
+With `sessions.mode: discovered`, every image and mask pattern must also contain
+`{session}`. In `single` mode, `{session}` is replaced by `default_session_id`; if other
+directories could be sessions, the manifest prints a warning so they are not silently
+overlooked.
 
-```bash
-radiomicviz whole \
-  --manifest out/manifest/regions_manifest.csv \
-  --variant b32 \
-  --dry-run
-```
+Habitat clustering requires modality keys named `T1` and `FLAIR`, even when the source
+files use names such as T1w or FLAIR3D.
 
-Run extraction, initially with a conservative worker count:
+### Region input forms
 
-```bash
-radiomicviz whole \
-  --manifest out/manifest/regions_manifest.csv \
-  --variant b32 \
-  --jobs 2
-```
-
-After the whole-region run has been reviewed, preview and run voxelwise extraction from
-the same manifest:
-
-```bash
-radiomicviz voxelwise \
-  --manifest out/manifest/regions_manifest.csv \
-  --variant b32 \
-  --dry-run
-
-radiomicviz voxelwise \
-  --manifest out/manifest/regions_manifest.csv \
-  --variant b32 \
-  --jobs 2
-```
-
-Voxelwise extraction is substantially more memory- and time-intensive than whole-region
-extraction. Start with one or two workers and a small representative cohort before raising
-`--jobs` on a cluster.
-
-After both T1 and FLAIR voxelwise units have completed, preview and run habitat
-clustering:
-
-```bash
-radiomicviz habitats \
-  --manifest out/manifest/regions_manifest.csv \
-  --variant b32 \
-  --dry-run
-
-radiomicviz habitats \
-  --manifest out/manifest/regions_manifest.csv \
-  --variant b32 \
-  --jobs 1
-```
-
-Habitat clustering reads many maps at once. Begin with one worker and raise `--jobs` only
-after checking memory use on representative large lesions.
-
-## Project configuration
-
-`project.yaml` describes only input discovery and the output root:
-
-- subject and optional session discovery;
-- one analysis-ready image pattern per modality;
-- one mask pattern that finds either separate binary regions or exactly one combined mask;
-- the lesion input mode and its mode-specific foreground, identifier and connectivity
-  settings;
-- the expected shared space; and
-- whether non-reference voxel spacing is allowed with an explicit warning.
-
-Patterns are relative to `data_root`. They can include `{subject}` and, for discovered
-sessions, `{session}`. The template defaults to T1 and FLAIR but modality names and image
-patterns can be edited.
-
-For existing separated masks, keep the template form:
+`per_region_masks` reads already-separated binary masks:
 
 ```yaml
 regions:
@@ -197,245 +130,86 @@ regions:
   connectivity: null
 ```
 
-For one integer-labeled map, use:
+`labeled_map` preserves every positive integer label as one region. `connected_components`
+splits a configured binary foreground using 6- or 26-connectivity. Connected components
+are numbered by descending voxel count, so the largest is `lesion_001`; touching
+foreground voxels remain one component.
 
-```yaml
-regions:
-  mode: labeled_map
-  region_type: lesion
-  mask_pattern: '{subject}/lesions/labeled_lesions.nii.gz'
-  id_regex: null
-  label: null
-  connectivity: null
+Materialization retains components or labels with at least 10 voxels. User-supplied masks
+are checked again by each extraction stage. Whole-region extraction accepts 10 voxels;
+voxelwise extraction requires more than 10.
+
+## Non-reference runs
+
+Setting `allow_nonreference_spacing: true` permits the manifest to contain non-1-mm
+inputs and stamps it `non-reference-spacing`. Extraction still requires an explicit
+acknowledgement:
+
+```bash
+radiomicviz whole --manifest out/manifest/regions_manifest.csv --allow-nonreference
 ```
 
-For one binary mask containing all lesions, use connected components and make the
-connectivity choice explicit:
+Use the same flag for later extraction stages. The legacy name
+`--allow-version-mismatch` remains accepted. Both flags record the deviations and stamp
+the outputs `non-reference`; neither changes the scientific preset.
 
-```yaml
-regions:
-  mode: connected_components
-  region_type: lesion
-  mask_pattern: '{subject}/lesions/all_lesions.nii.gz'
-  id_regex: null
-  label: 1
-  connectivity: 26
-```
+## Results
 
-With discovered sessions, include `{session}` in every image and mask pattern.
+Open these tables first:
 
-The manifest stage verifies:
+| Path under `output_root` | Contents |
+| --- | --- |
+| `tables/whole/b32/whole_region.csv` | Whole-region features by region and modality |
+| `tables/habitats/b32/habitat_index.csv` | Seven habitat-zone records per completed region |
+| `tables/habitat_features/b32/habitat_features.csv` | Habitat-zone features by method and modality |
+| `qc/<stage>_b32_qc.csv` | `PASS`, `WARN`, and `FAIL` checks |
+| `qc/<stage>_b32_errors.csv` | Blocking failures only |
+| `tables/<stage>/b32/summary/*.md` | Human-readable `--summarize` report |
 
-- exactly one image per subject, session and modality;
-- three-dimensional images and masks;
-- mask values of background 0 and the configured foreground label;
-- non-empty regions;
-- a warning for externally supplied regions below the 10-voxel extraction minimum;
-- matching image/mask geometry;
-- reference spacing of 1.0 +/- 0.001 mm per axis, unless explicitly overridden; and
-- safe, unique subject, session and region identifiers.
-
-`manifest --write` creates:
+Voxelwise maps, habitat masks, and per-unit completion files are under:
 
 ```text
-<output_root>/manifest/regions_manifest.csv
-<output_root>/manifest/input_checks.csv
-<output_root>/manifest/errors.csv
-<output_root>/manifest/run_metadata.json
-<output_root>/qc/logs/manifest.log
+subjects/<subject>/sessions/<session>/regions/<region>/
 ```
 
-Every manifest row contains one region and modality, including the direct `image_path`,
-mask path, label and file fingerprints. Rewriting the manifest archives the previous
-artifacts with `.bak-<timestamp>` suffixes.
+The tidy tables above are the primary outputs. `*_reference_format.csv` files preserve a
+legacy wide layout; their columns are defined in [REFERENCE.md](REFERENCE.md).
 
-## Whole-region radiomics
+Tiny or one-dimensional habitat zones are still attempted in the final stage. If
+PyRadiomics rejects such a zone, its table row is retained with `zone_status=skipped` and
+a QC warning; the run does not fail. Unexpected extraction errors remain failures and
+produce a nonzero exit code.
 
-`radiomicviz whole` treats each region and modality as one independent, resumable unit.
-The built-in `lesion-habitat-v1` protocol currently exposes the `b32` variant using the
-frozen `roi-allfeatures-bin32.yaml` preset.
+## Viewer
 
-Before constructing a PyRadiomics extractor, the command independently counts the
-configured label in every mask. Regions with fewer than 10 voxels receive a resumable
-`skipped` completion record and QC warning rather than an extraction error. This check
-also applies when users provide already separated binary masks, so those inputs cannot
-bypass the minimum-size rule.
+`radiomicviz view` opens a read-only browser dashboard for one output tree: images, region
+masks, voxelwise maps, habitat masks, feature tables, cohort context, QC, and provenance.
+It needs Flask (included in `environment.yml`, or the `viewer` extra) and never writes to
+`data_root` or `output_root`.
 
-The preset SHA-256 is:
-
-```text
-cd2f3e1da1028daaec55b5573b7e2d986b7f34302617452103724d94ff0f942b
+```bash
+radiomicviz view --manifest out/manifest/regions_manifest.csv --no-browser
 ```
 
-With the reference software stack, every successful unit must contain:
+Open the printed `http://127.0.0.1:<port>/?token=...` address. On a remote machine, first
+run `ssh -L <port>:localhost:<port> <cluster-login>`; VS Code forwards printed ports
+automatically. `--blind` hides identifiers. Details are in [REFERENCE.md](REFERENCE.md#viewer).
+Blind mode does not de-identify image anatomy or embedded file metadata.
 
-- 1,834 radiomic features;
-- 14 shape features;
-- 37 PyRadiomics diagnostic entries; and
-- ordered feature-schema SHA-256
-  `f4ea6da5d5191bfb24ad81f05cf7792d7c853294e460fcaf959621c00f02240e`.
+## Limitations
 
-The 14 shape features are expected for this PyRadiomics 3D shape implementation. Other
-documentation may count additional 2D-only shape features, which are not part of this 3D
-extraction.
+- Linux x86-64 with the pinned environment is the reference platform. Windows is used for
+  development tests only and should use a short output and pytest temporary path.
+- No preprocessing, registration, or watershed splitting of touching foreground is
+  provided.
+- Habitat clustering is defined for paired T1 and FLAIR feature maps.
+- The package is not published on PyPI.
 
-The historical preset contains an inaccurate comment suggesting that
-`resampledPixelSpacing: [1, 1, 1]` disables resampling. The parsed setting actually requests
-1-mm isotropic resampling with SimpleITK B-spline interpolation. The preset bytes are
-preserved for validation parity; the correction is documented here rather than editing the
-reference file.
+## More information
 
-## Whole-region outputs
-
-Primary tidy table:
-
-```text
-<output_root>/tables/whole/b32/whole_region.csv
-```
-
-Historical wide-format compatibility table:
-
-```text
-<output_root>/tables/whole/b32/whole_region_reference_format.csv
-```
-
-The compatibility table contains 1,880 columns: 9 identity columns, 37 diagnostics and
-1,834 features. QC and provenance are written to:
-
-```text
-<output_root>/qc/whole_b32_qc.csv
-<output_root>/qc/whole_b32_errors.csv
-<output_root>/qc/whole_b32_run_metadata.json
-<output_root>/qc/logs/whole_b32.log
-```
-
-Per-unit features and completion records are stored beneath:
-
-```text
-<output_root>/subjects/<subject>/sessions/<session>/regions/<region>/radiomics/whole/b32/<modality>/
-```
-
-A rerun resumes units whose inputs, preset, protocol, software and outputs still match.
-Use `--force` to archive and recompute existing units. Failed units and non-finite feature
-values remain visible in the cohort and QC outputs rather than being silently discarded.
-
-Reference versions are enforced by default. `--allow-version-mismatch` permits an
-intentional diagnostic run and stamps it non-reference with the exact deviations.
-
-## Voxelwise radiomics
-
-`radiomicviz voxelwise` uses the canonical manifest directly; no second CSV or lesion-tree
-layout is needed. Its frozen 32-bin parameter file is the reference validation preset,
-with SHA-256:
-
-```text
-ae781c704fd5688bd5ecf9f0a8083464e3981d21dbd2f1bd2a1e31ec48eb5cde
-```
-
-The extractor calls PyRadiomics with `voxelBased=True` and the manifest label at execution
-time. The preset uses the original image only, does not resample, uses a one-voxel kernel,
-keeps the kernel inside the lesion, initializes non-feature voxels to NaN, and requests 32
-gray-level bins. GLCM MCC is excluded because it is numerically unstable in voxelwise mode.
-
-Every successful region/modality unit contains 92 float64 NRRD maps:
-
-- 18 first-order;
-- 23 GLCM;
-- 16 GLRLM;
-- 16 GLSZM;
-- 14 GLDM; and
-- 5 NGTDM.
-
-Maps retain the input spacing and direction and cover the region bounding box plus the
-one-voxel kernel padding. They are written beneath:
-
-```text
-<output_root>/subjects/<subject>/sessions/<session>/regions/<region>/radiomics/voxelwise/b32/<modality>/
-```
-
-The preset sets PyRadiomics `minimumROISize` to 10. PyRadiomics applies this threshold
-strictly, so voxelwise extraction requires more than 10 lesion voxels. Regions with 10 or
-fewer voxels receive a hash-checked `skipped` completion record and a QC warning, so they
-remain visible without causing the entire command to fail. This voxelwise rule does not
-change the package-wide 10-voxel materialization threshold or whole-region extraction.
-
-PyRadiomics 3.0.1 can produce an entirely non-finite
-`original_glcm_JointAverage` voxel map for thin or small lesions because its symmetric
-GLCM calculation combines directional values with a regular mean. RadiomicsViz retains
-that map, completes the unit, and records a targeted QC warning; all other maps are still
-validated normally. For a symmetric GLCM, finite JointAverage values equal
-`SumAverage / 2`, so no value is imputed or substituted. A completely non-finite map with
-any other name remains an extraction failure. New completion records include finite-voxel
-counts for every map; older valid completion records remain resumable.
-
-Extraction exceptions, wrong map schemas, unreadable maps, wrong geometry and
-non-float64 maps are also recorded as failures.
-
-Invocation reports are written to:
-
-```text
-<output_root>/qc/voxelwise_b32_qc.csv
-<output_root>/qc/voxelwise_b32_errors.csv
-<output_root>/qc/voxelwise_b32_run_metadata.json
-<output_root>/qc/logs/voxelwise_b32.log
-```
-
-Identical reruns resume completed and expected-skipped units. A changed input, preset,
-protocol, software stack or output fingerprint blocks reuse. `--force` archives the existing
-unit directory before recomputing it.
-
-## Habitat clustering
-
-`radiomicviz habitats` requires a completed voxelwise `b32` unit for both T1 and FLAIR
-for each region. It implements the validated reference methodology as three outputs:
-
-- `fixed_k2`: prespecified two-cluster KMeans, the primary habitat analysis;
-- `adaptive_k1to3`: sensitivity analysis that selects k=1, 2 or 3 using minimum cluster
-  size and silhouette rules; and
-- `geometric_1mm`: a non-radiomic 1 mm shell/core comparator.
-
-For regions with at least 50 voxels, feature handling is entirely region-local. T1 and
-FLAIR maps are median/IQR scaled, non-finite standardized values are set to the local
-median, redundant features are removed jointly at absolute Spearman rho >= 0.90, and each
-retained modality block is weighted by `1/sqrt(number of retained features)`. Fixed and
-adaptive KMeans use this same matrix with seed 42 and 10 initializations. Cluster labels
-are reordered from peripheral to central by mean physical distance from the region
-boundary; the names describe geometry and do not imply rim pathology.
-
-Regions with 11–49 voxels receive the reference one-habitat fallback for the radiomic
-methods and still receive the geometric comparator. Regions with 10 or fewer voxels have
-no upstream voxelwise maps and are recorded as explicit habitat skips. Fixed k=2 genuine
-two-cluster results are preserved even when a cluster is small; `habitat_valid` separately
-records whether both clusters meet the maximum of 10 voxels and 5% of region size.
-
-Each completed region produces three uint8 label masks and exactly seven method/zone
-rows. Outputs are stored beneath:
-
-```text
-<output_root>/subjects/<subject>/sessions/<session>/regions/<region>/habitats/
-  fixed_k2/b32/mask.nii.gz
-  adaptive_k1to3/b32/mask.nii.gz
-  geometric_1mm/mask.nii.gz
-  reference/b32/completion.json
-```
-
-Cohort and invocation reports are written to:
-
-```text
-<output_root>/tables/habitats/b32/habitat_index.csv
-<output_root>/tables/habitats/b32/lesion_qc.csv
-<output_root>/qc/habitats_b32_qc.csv
-<output_root>/qc/habitats_b32_errors.csv
-<output_root>/qc/habitats_b32_run_metadata.json
-<output_root>/qc/logs/habitats_b32.log
-```
-
-The completion record authenticates both voxelwise completion records, the authoritative
-mask, protocol, software, scientific-configuration hash and output masks. Identical reruns
-resume. Partial, changed or corrupted outputs block reuse unless `--force` is supplied.
-
-## Scope
-
-The current package implements `project init`, optional combined-mask lesion
-materialization, `manifest`, `whole`, `voxelwise` and reference habitat clustering.
-Habitat-level radiomics and scheduler adapters are later stages.
+- [INSTALLATION_DETAILS.md](INSTALLATION_DETAILS.md): reference installation,
+  verification, tests, and troubleshooting.
+- [REFERENCE.md](REFERENCE.md): presets, thresholds, habitat methods, output schemas, and
+  status values.
+- [CHANGELOG.md](CHANGELOG.md): changes by version.
+- `radiomicviz <command> --help`: command options.

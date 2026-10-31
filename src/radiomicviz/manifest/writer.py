@@ -34,6 +34,22 @@ def write_manifest_outputs(preview: ManifestPreview) -> ManifestWriteResult:
     artifacts always describes one write. A preview with blocking failures writes only
     its diagnostics.
     """
+    try:
+        preview.output_root.relative_to(preview.data_root)
+    except ValueError:
+        pass
+    else:
+        raise ValueError(
+            "refusing to write manifest diagnostics inside data_root; choose a separate output_root"
+        )
+    try:
+        preview.output_root.relative_to(preview.data_root)
+    except ValueError:
+        pass
+    else:
+        raise ValueError(
+            "refusing to write manifest diagnostics inside data_root; choose a separate output_root"
+        )
     manifest_dir = preview.output_root / "manifest"
     log_dir = preview.output_root / "qc" / "logs"
     manifest_dir.mkdir(parents=True, exist_ok=True)

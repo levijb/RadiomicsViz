@@ -1,0 +1,178 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{ title }}</title>
+<link rel="stylesheet" href="{{ url_for('static', filename='viewer.css') }}">
+</head>
+<body data-blind="{{ 'true' if blind else 'false' }}">
+<header class="topbar">
+  <h1>RadiomicsViz viewer</h1>
+  <span id="project-line" class="muted"></span>
+  <span class="spacer"></span>
+  <button id="rescan" type="button" title="Re-read the output tree from disk">Rescan</button>
+</header>
+<div id="banners" aria-live="polite"></div>
+<nav class="tabs" role="tablist">
+  <button type="button" role="tab" data-tab="overview" class="active">Overview</button>
+  <button type="button" role="tab" data-tab="regions">Regions</button>
+  <button type="button" role="tab" data-tab="cohort">Cohort</button>
+  <button type="button" role="tab" data-tab="qc">QC and provenance</button>
+</nav>
+<main>
+  <section id="tab-overview" class="tab active">
+    <h2>Project</h2>
+    <table id="project-table" class="kv"></table>
+    <h2>Stage status</h2>
+    <p class="muted">Counts of regions by the worst status of their units in each stage.</p>
+    <table id="stage-counts" class="grid"></table>
+    <h2>Region by stage</h2>
+    <div class="scroll"><table id="status-matrix" class="grid"></table></div>
+  </section>
+
+  <section id="tab-regions" class="tab">
+    <div class="regions-layout">
+      <aside class="region-list">
+        <div class="filters">
+          <label>Search <input id="f-q" type="search" placeholder="text, not a pattern"></label>
+          <label>Subject <select id="f-subject"><option value="">all</option></select></label>
+          <label>Session <select id="f-session"><option value="">all</option></select></label>
+          <label>Region type <select id="f-type"><option value="">all</option></select></label>
+          <label>Stage <select id="f-stage"><option value="">any</option></select></label>
+          <label>Status <select id="f-status"><option value="">any</option></select></label>
+          <label>Voxels from <input id="f-min" type="number" min="0" step="1"></label>
+          <label>to <input id="f-max" type="number" min="0" step="1"></label>
+          <label>Sort <select id="f-sort"><option value="id">identifier</option><option value="voxels">voxels ascending</option><option value="-voxels">voxels descending</option></select></label>
+        </div>
+        <p id="region-count" class="muted"></p>
+        <ol id="region-items"></ol>
+        <button id="more-regions" type="button" hidden>Show more</button>
+      </aside>
+      <div class="region-main">
+        <div id="region-empty" class="muted">Select a region.</div>
+        <div id="region-view" hidden>
+          <div class="region-head">
+            <h2 id="region-title"></h2>
+            <span id="region-badges"></span>
+          </div>
+          <div class="viewer-controls">
+            <fieldset>
+              <legend>Image</legend>
+              <label>Background <select id="c-background"></select></label>
+              <label><input id="c-mask" type="checkbox" checked> Region mask</label>
+              <label>Opacity <input id="c-mask-opacity" type="range" min="0" max="1" step="0.05" value="0.35"></label>
+            </fieldset>
+            <fieldset>
+              <legend>Habitat mask</legend>
+              <label>Method <select id="c-habitat"><option value="">none</option></select></label>
+              <label>Grid <select id="c-habitat-grid"><option value="crop">cropped</option><option value="source">source grid</option></select></label>
+              <label>Opacity <input id="c-habitat-opacity" type="range" min="0" max="1" step="0.05" value="0.6"></label>
+              <div id="habitat-legend" class="legend"></div>
+            </fieldset>
+            <fieldset>
+              <legend>Voxelwise feature map</legend>
+              <label>Modality <select id="c-map-modality"><option value="">none</option></select></label>
+              <label>Find <input id="c-map-search" type="search" placeholder="filter features"></label>
+              <label>Feature <select id="c-map-feature"></select></label>
+              <label>Colormap <select id="c-map-cmap"></select></label>
+              <label>Min <input id="c-map-min" type="number" step="any"></label>
+              <label>Max <input id="c-map-max" type="number" step="any"></label>
+              <label>Opacity <input id="c-map-opacity" type="range" min="0" max="1" step="0.05" value="0.8"></label>
+              <label><input id="c-map-threshold" type="checkbox"> Hide values below min</label>
+              <label><input id="c-map-lock" type="checkbox"> Keep range when switching</label>
+            </fieldset>
+            <fieldset>
+              <legend>View</legend>
+              <label>Layout <select id="c-slice">
+                <option value="multiplanar">multiplanar</option><option value="axial">axial</option>
+                <option value="coronal">coronal</option><option value="sagittal">sagittal</option>
+                <option value="render">3D render</option></select></label>
+              <label><input id="c-radiological" type="checkbox"> Radiological convention</label>
+              <button id="c-centroid" type="button">Jump to region centroid</button>
+              <button id="c-reset" type="button">Reset view</button>
+              <button id="c-screenshot" type="button">Save PNG</button>
+            </fieldset>
+          </div>
+          <div class="canvas-wrap"><canvas id="gl" width="900" height="560"></canvas></div>
+          <p class="keys muted">Keys: j / k next / previous region, n / p next / previous feature, o toggle feature overlay, r reset view.</p>
+          <div id="readout" class="readout"></div>
+          <div id="layer-warnings"></div>
+          <details open><summary>Layers</summary><table id="layer-info" class="grid"></table><p id="grid-note" class="muted"></p></details>
+          <nav class="subtabs">
+            <button type="button" data-sub="whole" class="active">Whole-region features</button>
+            <button type="button" data-sub="habitat">Habitat features</button>
+            <button type="button" data-sub="zones">Habitat zones</button>
+            <button type="button" data-sub="units">Stages and QC</button>
+          </nav>
+          <div id="sub-whole" class="subtab active">
+            <label>Modality <select id="t-whole-modality"></select></label>
+            <label>Find <input id="t-whole-search" type="search" placeholder="filter features"></label>
+            <p id="t-whole-meta" class="muted"></p>
+            <div id="t-whole"></div>
+          </div>
+          <div id="sub-habitat" class="subtab">
+            <label>Method <select id="t-hab-method"></select></label>
+            <label>Modality <select id="t-hab-modality"><option>T1</option><option>FLAIR</option></select></label>
+            <label>Compare <select id="t-hab-a"></select> with <select id="t-hab-b"></select></label>
+            <p id="t-hab-meta" class="muted"></p>
+            <div id="t-hab"></div>
+          </div>
+          <div id="sub-zones" class="subtab"><p id="zones-note" class="muted"></p><table id="t-zones" class="grid"></table></div>
+          <div id="sub-units" class="subtab">
+            <button id="verify" type="button">Verify SHA-256 of this region now</button>
+            <div id="verify-result"></div>
+            <table id="t-units" class="grid"></table>
+            <h3>Checks</h3>
+            <table id="t-checks" class="grid"></table>
+            <h3>Mask provenance</h3>
+            <table id="t-material" class="grid kv"></table>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section id="tab-cohort" class="tab">
+    <h2>Feature distribution</h2>
+    <div class="filters inline">
+      <label>Stage <select id="k-stage"><option value="whole">whole</option><option value="habitat_features">habitat-features</option></select></label>
+      <label>Modality <select id="k-modality"></select></label>
+      <label>Method <select id="k-method"></select></label>
+      <label>Zone <select id="k-zone"></select></label>
+      <label>Feature <input id="k-feature" type="text" list="k-features" placeholder="feature column"></label>
+      <datalist id="k-features"></datalist>
+      <button id="k-go" type="button">Show</button>
+    </div>
+    <canvas id="k-hist" width="760" height="240"></canvas>
+    <p id="k-meta" class="muted"></p>
+    <h2>Region sizes</h2>
+    <canvas id="k-sizes" width="760" height="200"></canvas>
+    <p id="k-sizes-meta" class="muted"></p>
+    <h2>Habitat zone size fractions</h2>
+    <table id="k-zones" class="grid"></table>
+  </section>
+
+  <section id="tab-qc" class="tab">
+    <h2>Checks, skips and failures</h2>
+    <div class="filters inline">
+      <label>Stage <select id="q-stage"><option value="">all</option></select></label>
+      <label>Status <select id="q-status"><option value="">WARN and FAIL</option><option>WARN</option><option>FAIL</option></select></label>
+    </div>
+    <p id="q-count" class="muted"></p>
+    <div class="scroll"><table id="q-table" class="grid"></table></div>
+    <h2>Software, presets and reference status</h2>
+    <table id="q-software" class="grid"></table>
+    <h2>Stage summaries</h2>
+    <div id="q-summary-buttons"></div>
+    <pre id="q-summary" class="summary"></pre>
+    <h2>Downloads</h2>
+    <p class="muted">Files are served unchanged. In the legacy *_reference_format.csv tables, "Patient" is a row number within each table and "Cluster" is the habitat label value.</p>
+    <ul id="q-downloads"></ul>
+  </section>
+</main>
+<footer><span id="disclaimer">{{ disclaimer }}</span> <span class="muted">RadiomicsViz {{ version }}. Read-only viewer.</span></footer>
+<script src="{{ url_for('static', filename='vendor/niivue/niivue.umd.js') }}"></script>
+<script src="{{ url_for('static', filename='viewer.js') }}"></script>
+</body>
+</html>

@@ -21,6 +21,7 @@ _IDENTITY_FIELDS = (
     "region_type",
     "modality",
     "variant",
+    "reference_status",
     "image_path",
     "mask_path",
     "label",

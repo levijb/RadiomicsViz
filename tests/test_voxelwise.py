@@ -15,7 +15,11 @@ from radiomicviz.config import load_project_config
 from radiomicviz.config.templates import template_text
 from radiomicviz.manifest import build_manifest_preview, write_manifest_outputs
 from radiomicviz.protocols import load_protocol
-from radiomicviz.voxelwise import load_voxelwise_plan, run_voxelwise
+from radiomicviz.voxelwise import (
+    load_voxelwise_plan,
+    run_voxelwise,
+    summarize_voxelwise,
+)
 
 JOINT_AVERAGE = "original_glcm_JointAverage"
 MAP_NAMES = (
@@ -285,6 +289,14 @@ def test_all_nan_joint_average_completes_with_targeted_warning(tmp_path):
         assert set(completion["map_finite_voxels"]) == set(MAP_NAMES)
         assert (unit.output_dir / f"{JOINT_AVERAGE}.nrrd").is_file()
 
+    summary = summarize_voxelwise(manifest_path)
+    coverage = [
+        row for row in _rows(summary.maps_path) if row["map"] == JOINT_AVERAGE
+    ]
+    assert len(coverage) == 2
+    assert all(row["zero_finite_units"] == "2" for row in coverage)
+    assert all(float(row["mean_finite_fraction"]) == 0.0 for row in coverage)
+
     resumed = run_voxelwise(
         plan,
         protocol,
@@ -358,3 +370,44 @@ def test_voxelwise_failed_units_are_visible_in_errors(tmp_path):
     rows = _rows(result.errors_path)
     assert len(rows) == 2
     assert all("deliberate voxelwise failure" in row["message"] for row in rows)
+
+
+def test_voxelwise_summary_writes_map_coverage_and_archives_prior_reports(tmp_path):
+    manifest_path, _output_root = _case(tmp_path)
+    run = run_voxelwise(
+        load_voxelwise_plan(manifest_path),
+        _test_protocol(),
+        extractor_factory=_factory,
+        software=FAKE_SOFTWARE,
+    )
+    assert run.valid
+
+    summary = summarize_voxelwise(manifest_path, top_maps=2)
+    assert (summary.total_units, summary.successful_units) == (4, 4)
+    assert (summary.skipped_units, summary.failed_units) == (0, 0)
+    assert summary.map_count == 3
+    assert summary.markdown_path.is_file()
+    assert len(_rows(summary.maps_path)) == 6
+    report = json.loads(summary.json_path.read_text(encoding="utf-8"))
+    assert all(report["validations"].values())
+    assert len(report["lowest_coverage_maps"]) == 2
+
+    repeated = summarize_voxelwise(manifest_path, top_maps=2)
+    assert len(repeated.backups) == 6
+    assert all(path.is_file() for path in repeated.backups)
+
+
+def test_voxelwise_summary_counts_expected_skips(tmp_path):
+    manifest_path, _output_root = _case(tmp_path, tiny_second=True)
+    run = run_voxelwise(
+        load_voxelwise_plan(manifest_path),
+        _test_protocol(),
+        extractor_factory=_factory,
+        software=FAKE_SOFTWARE,
+    )
+    assert run.skipped == 2
+
+    summary = summarize_voxelwise(manifest_path)
+    assert (summary.successful_units, summary.skipped_units) == (2, 2)
+    report = json.loads(summary.json_path.read_text(encoding="utf-8"))
+    assert all(report["validations"].values())

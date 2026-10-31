@@ -3,6 +3,7 @@ import subprocess
 import sys
 
 import radiomicviz
+from radiomicviz._platform import reference_platform_deviation
 from radiomicviz.config.templates import TEMPLATE_NAMES, template_text
 
 
@@ -26,3 +27,11 @@ def test_templates_ship_with_the_package():
         text = template_text(name)
         assert text.startswith("# ====")
         assert "\r" not in text
+
+
+def test_reference_platform_is_explicit_but_optional_for_injected_test_records():
+    assert reference_platform_deviation({}) is None
+    assert reference_platform_deviation({"platform": "Linux-x86_64"}) is None
+    assert "reference platform is Linux-x86_64" in reference_platform_deviation(
+        {"platform": "Windows-x86_64"}
+    )

@@ -35,12 +35,14 @@
 # Version of this file's layout. Leave at 1.
 schema_version: 1
 
-# Folder that contains the subject folders.
+# Folder that contains one folder per subject. A flat folder containing all
+# subjects' files is not supported.
 data_root: /path/to/data
 
-# Folder where RadiomicsViz writes everything it produces. Files under
-# data_root are never modified.
-output_root: /path/to/radiomicsviz_output
+# Folder where RadiomicsViz writes everything it produces. The default below
+# creates an "out" folder beside project.yaml. Files under data_root are never
+# modified.
+output_root: out
 
 # -----------------------------------------------------------------------------
 # Subjects
@@ -58,7 +60,9 @@ subjects:
 # -----------------------------------------------------------------------------
 sessions:
   # single:     one session per subject. Every session is recorded with the
-  #             identifier in default_session_id.
+  #             identifier in default_session_id. If a pattern contains
+  #             {session}, only that named folder is read; other possible
+  #             session folders produce a manifest warning.
   # discovered: session folders inside each subject folder are found with
   #             discovery_pattern and named by the group "session" of
   #             id_regex. Every pattern below must then contain {session}.
@@ -77,8 +81,9 @@ sessions:
 # -----------------------------------------------------------------------------
 # Modalities
 # -----------------------------------------------------------------------------
-# One entry per analysis-ready image type. The names (T1, FLAIR) are the
-# modality identifiers written to the manifest.
+# One entry per analysis-ready image type. Keep the canonical role names T1 and
+# FLAIR when habitat clustering will be used; the file patterns may match source
+# files named T1w, FLAIR3D or any other site-specific convention.
 modalities:
   T1:
     # Pattern for the final T1 image of one subject/session. It must match
@@ -99,7 +104,8 @@ regions:
   #                          components become lesions numbered by descending
   #                          voxel count (largest is lesion_001).
   mode: per_region_masks
-  # Kind of region, recorded in every output table.
+  # Kind of region, recorded in every output table and used to name
+  # materialized masks (<region_type>_001, <region_type>_002, ...).
   region_type: lesion
   # per_region_masks: pattern matching every lesion mask of one subject/session.
   # labeled_map or connected_components: pattern matching exactly one combined
@@ -126,6 +132,6 @@ space_id: native
 
 # The reference analysis expects 1.0 mm voxel spacing on every axis (within
 # 0.001 mm). Images outside that tolerance stop the manifest stage. Setting
-# this to true turns the stop into a warning and marks the run as
-# non-reference.
+# this to true turns the stop into a warning and marks the manifest as
+# non-reference. Extraction commands must then also use --allow-nonreference.
 allow_nonreference_spacing: false

@@ -3,6 +3,7 @@ import json
 from pathlib import Path
 
 import numpy as np
+import nibabel as nib
 import pytest
 import SimpleITK as sitk
 import yaml
@@ -148,6 +149,7 @@ def test_geometry_mismatch_is_rejected(tmp_path):
     preview = build_manifest_preview(load_project_config(project_path))
     assert not preview.valid
     assert "mask_image_geometry" in {error.error_code for error in preview.errors}
+    assert any("(origin)" in error.message for error in preview.errors)
 
 
 def test_identifiers_extracted_from_paths_must_be_safe(tmp_path):
@@ -172,6 +174,64 @@ def test_patterns_cannot_escape_data_root(tmp_path):
     assert "image_pattern" in {error.error_code for error in preview.errors}
 
 
+def test_truncated_nifti_is_rejected_before_extraction(tmp_path):
+    project_path, data_root, _output_root = _project(tmp_path)
+    image_path = data_root / "sub-001" / "anat" / "sub-001_T1w_preprocessed.nii.gz"
+    payload = image_path.read_bytes()
+    image_path.write_bytes(payload[: len(payload) // 2])
+
+    preview = build_manifest_preview(load_project_config(project_path))
+
+    assert not preview.valid
+    assert "image_unreadable" in {error.error_code for error in preview.errors}
+
+
+def test_nonfinite_nifti_is_rejected_before_simpleitk_can_sanitise_it(tmp_path):
+    project_path, data_root, _output_root = _project(tmp_path)
+    image_path = data_root / "sub-001" / "anat" / "sub-001_T1w_preprocessed.nii.gz"
+    source = nib.load(str(image_path))
+    values = np.asanyarray(source.dataobj).copy()
+    values.flat[0] = np.nan
+    values.flat[1] = np.inf
+    nib.save(nib.Nifti1Image(values, source.affine, source.header), str(image_path))
+
+    preview = build_manifest_preview(load_project_config(project_path))
+
+    assert not preview.valid
+    assert "image_nonfinite" in {error.error_code for error in preview.errors}
+
+
+def test_vector_image_is_rejected_with_a_concise_error(tmp_path):
+    project_path, data_root, _output_root = _project(tmp_path)
+    image_path = data_root / "sub-001" / "anat" / "sub-001_T1w_preprocessed.nii.gz"
+    vector = sitk.GetImageFromArray(
+        np.zeros((10, 10, 10, 2), dtype=np.float32), isVector=True
+    )
+    vector.SetSpacing((1.0, 1.0, 1.0))
+    sitk.WriteImage(vector, str(image_path))
+
+    preview = build_manifest_preview(load_project_config(project_path))
+
+    assert not preview.valid
+    assert "image_components" in {error.error_code for error in preview.errors}
+
+
+def test_output_root_inside_data_root_is_never_written(tmp_path):
+    project_path, data_root, _output_root = _project(tmp_path)
+    unsafe_output = data_root / "generated"
+    data = yaml.safe_load(project_path.read_text(encoding="utf-8"))
+    data["output_root"] = str(unsafe_output)
+    project_path.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
+
+    result = CliRunner().invoke(
+        main, ["manifest", "--project", str(project_path), "--write"]
+    )
+
+    assert result.exit_code != 0
+    assert "separate" in result.output or "inside data_root" in result.output
+    assert not unsafe_output.exists()
+
+
 def test_writer_creates_minimal_artifacts_and_hashes(tmp_path):
     project_path, _data_root, output_root = _project(tmp_path)
     preview = build_manifest_preview(load_project_config(project_path))
@@ -194,7 +254,8 @@ def test_writer_creates_minimal_artifacts_and_hashes(tmp_path):
         assert reader.fieldnames == [
             "subject_id", "session_id", "region_id", "region_type", "modality",
             "image_path", "mask_path", "label", "space_id", "image_size_bytes",
-            "image_mtime_utc", "mask_size_bytes", "mask_mtime_utc",
+            "image_mtime_utc", "image_sha256", "mask_size_bytes", "mask_mtime_utc",
+            "mask_sha256",
         ]
         assert len(list(reader)) == 4
 
@@ -295,3 +356,37 @@ def test_discovered_sessions_are_supported(tmp_path):
     assert preview.regions_found == 2
     assert len(preview.rows) == 4
     assert {row.session_id for row in preview.rows} == {"ses-01", "ses-02"}
+
+
+def test_single_session_mode_warns_before_ignoring_other_session_folders(tmp_path):
+    data_root = tmp_path / "data"
+    output_root = tmp_path / "output"
+    for session in ("ses-01", "ses-02"):
+        base = data_root / "sub-001" / session
+        _write_image(base / "anat" / "T1.nii.gz")
+        _write_image(base / "anat" / "FLAIR.nii.gz")
+        _write_mask(base / "lesions" / "lesion_001.nii.gz", np.s_[1:5, 1:5, 1:5])
+    data = yaml.safe_load(template_text("project"))
+    data["data_root"] = str(data_root)
+    data["output_root"] = str(output_root)
+    data["modalities"]["T1"]["image_pattern"] = "{subject}/{session}/anat/T1.nii.gz"
+    data["modalities"]["FLAIR"]["image_pattern"] = "{subject}/{session}/anat/FLAIR.nii.gz"
+    data["regions"]["mask_pattern"] = "{subject}/{session}/lesions/*.nii.gz"
+    project_path = tmp_path / "project.yaml"
+    project_path.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
+
+    preview = build_manifest_preview(load_project_config(project_path))
+
+    assert preview.valid
+    assert preview.sessions_found == 1
+    assert {row.session_id for row in preview.rows} == {"ses-01"}
+    warning = next(
+        check for check in preview.checks
+        if check.check_id == "additional_sessions_ignored"
+    )
+    assert warning.status == "WARN"
+    assert "ses-02" in warning.measured_value
+
+    cli = CliRunner().invoke(main, ["manifest", "--project", str(project_path)])
+    assert cli.exit_code == 0
+    assert "WARN [sub-001/ses-01] additional_sessions_ignored" in cli.output

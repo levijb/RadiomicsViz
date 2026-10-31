@@ -1,0 +1,12 @@
+{
+  "name": "@niivue/niivue",
+  "version": "0.69.0",
+  "file": "niivue.umd.js",
+  "file_sha256": "47b896b77ec4a5be3ef1949c33ad393b6f45629921f326c279000bcf51bdb4af",
+  "source": "https://registry.npmjs.org/@niivue/niivue/-/niivue-0.69.0.tgz",
+  "source_sha256": "6e9a6a471b428eb3b258a0086beca9187d95e43a781a39e8a519c6da246af485",
+  "path_in_source": "package/dist/niivue.umd.js",
+  "license": "BSD-2-Clause",
+  "license_text_source": "https://raw.githubusercontent.com/niivue/niivue/main/LICENSE",
+  "license_note": "The npm package ships no LICENSE file; the v0.69.0 and 0.69.0 tags returned 404, so the text comes from the default branch."
+}

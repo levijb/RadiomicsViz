@@ -8,13 +8,21 @@ from radiomicviz.habitats.plan import (
     HabitatUnit,
     load_habitat_plan,
 )
+from radiomicviz.habitats.summary import (
+    HabitatSummaryError,
+    HabitatSummaryResult,
+    summarize_habitats,
+)
 
 __all__ = [
     "HabitatPlan",
     "HabitatPlanError",
     "HabitatRunResult",
     "HabitatStageError",
+    "HabitatSummaryError",
+    "HabitatSummaryResult",
     "HabitatUnit",
     "load_habitat_plan",
     "run_habitats",
+    "summarize_habitats",
 ]

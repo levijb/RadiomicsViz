@@ -3,6 +3,8 @@ from __future__ import annotations
 import csv
 import hashlib
 import json
+import os
+import pickle
 from collections import OrderedDict
 from dataclasses import replace
 from pathlib import Path
@@ -16,7 +18,8 @@ from radiomicviz.config import load_project_config
 from radiomicviz.config.templates import template_text
 from radiomicviz.manifest import build_manifest_preview, write_manifest_outputs
 from radiomicviz.protocols import load_protocol
-from radiomicviz.whole import load_whole_plan, run_whole
+from radiomicviz.whole import load_whole_plan, run_whole, summarize_whole
+from radiomicviz.whole.pipeline import _DefaultExtractionTask, _ExtractionPlan
 
 FEATURE_NAMES = ("original_shape_Elongation", "original_firstorder_Mean")
 FAKE_SOFTWARE = {
@@ -138,6 +141,7 @@ def test_whole_extracts_every_region_and_modality_and_writes_cohort_tables(tmp_p
     assert result.resumed == 0
     tidy_rows = _rows(result.table_path)
     assert len(tidy_rows) == 4
+    assert {row["reference_status"] for row in tidy_rows} == {"reference-compatible"}
     assert all(row["image_path"] for row in tidy_rows)
     assert all("analysis_image_path" not in row for row in tidy_rows)
     assert len(_rows(result.reference_table_path)) == 4
@@ -257,6 +261,136 @@ def test_corrupted_unit_blocks_until_force_then_is_archived(tmp_path):
     assert list(corrupt_dir.parent.glob(f"{corrupt_dir.name}.bak-*"))
 
 
+def test_same_size_output_edit_is_detected_by_content_hash(tmp_path):
+    manifest_path, _output_root = _case(tmp_path)
+    plan = load_whole_plan(manifest_path)
+    protocol = _test_protocol()
+    options = dict(extractor_factory=_factory, software=FAKE_SOFTWARE)
+    first = run_whole(plan, protocol, **options)
+    result_path = first.units[0].output_dir / "whole_features.csv"
+    stat = result_path.stat()
+    text = result_path.read_text(encoding="utf-8")
+    replacement = "9" if text[-3] != "9" else "8"
+    result_path.write_text(text[:-3] + replacement + text[-2:], encoding="utf-8")
+    os.utime(result_path, ns=(stat.st_atime_ns, stat.st_mtime_ns))
+
+    preview = run_whole(plan, protocol, dry_run=True, **options)
+
+    assert any(unit.status == "blocked" for unit in preview.units)
+
+
+def test_touch_and_output_relocation_do_not_invalidate_content(tmp_path):
+    manifest_path, output_root = _case(tmp_path)
+    protocol = _test_protocol()
+    options = dict(extractor_factory=_factory, software=FAKE_SOFTWARE)
+    plan = load_whole_plan(manifest_path)
+    run_whole(plan, protocol, **options)
+    image_path = plan.units[0].image_path
+    stat = image_path.stat()
+    os.utime(image_path, ns=(stat.st_atime_ns, stat.st_mtime_ns + 1_000_000_000))
+    moved = tmp_path / "moved-output"
+    output_root.rename(moved)
+
+    preview = run_whole(
+        load_whole_plan(moved / "manifest" / "regions_manifest.csv"),
+        protocol,
+        dry_run=True,
+        **options,
+    )
+
+    assert {unit.status for unit in preview.units} == {"would-resume"}
+
+
+def test_process_pool_task_does_not_pickle_the_cohort_plan(tmp_path):
+    manifest_path, _output_root = _case(tmp_path)
+    plan = load_whole_plan(manifest_path)
+    protocol = _test_protocol()
+    task = _DefaultExtractionTask(
+        plan.units[0],
+        _ExtractionPlan(
+            plan.output_root,
+            plan.manifest_sha256,
+            plan.manifest_reference_status,
+        ),
+        protocol,
+        protocol.roi_preset("b32"),
+        FAKE_SOFTWARE,
+        False,
+    )
+
+    assert len(pickle.dumps(task)) < 16 * 1024
+
+
+def test_one_dimensional_region_is_a_resumable_skip(tmp_path):
+    data_root = tmp_path / "data"
+    subject = data_root / "sub-001"
+    image_values = np.arange(16**3, dtype=np.float32).reshape(16, 16, 16)
+    for name in ("sub-001_T1w_preprocessed.nii.gz", "sub-001_FLAIR_preprocessed.nii.gz"):
+        path = subject / "anat" / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        image = sitk.GetImageFromArray(image_values)
+        image.SetSpacing((1.0, 1.0, 1.0))
+        sitk.WriteImage(image, str(path))
+    mask_values = np.zeros((16, 16, 16), dtype=np.uint8)
+    mask_values[8, 8, 2:14] = 1
+    mask_path = subject / "lesions" / "lesion_001.nii.gz"
+    mask_path.parent.mkdir(parents=True, exist_ok=True)
+    mask = sitk.GetImageFromArray(mask_values)
+    mask.SetSpacing((1.0, 1.0, 1.0))
+    sitk.WriteImage(mask, str(mask_path))
+    project = yaml.safe_load(template_text("project"))
+    project["data_root"] = str(data_root)
+    project["output_root"] = str(tmp_path / "output")
+    project_path = tmp_path / "project.yaml"
+    project_path.write_text(yaml.safe_dump(project, sort_keys=False), encoding="utf-8")
+    preview = build_manifest_preview(load_project_config(project_path))
+    manifest_path = write_manifest_outputs(preview).manifest_path
+
+    result = run_whole(
+        load_whole_plan(manifest_path),
+        _test_protocol(),
+        extractor_factory=_factory,
+        software=FAKE_SOFTWARE,
+    )
+
+    assert preview.valid
+    assert any(
+        check.check_id == "region_dimensions" and check.status == "WARN"
+        for check in preview.checks
+    )
+    assert (result.skipped, result.failed) == (2, 0)
+    for unit in result.units:
+        completion = json.loads(unit.completion_path.read_text(encoding="utf-8"))
+        assert completion["skip_code"] == "whole_minimum_roi_dimensions"
+
+
+def test_constant_roi_intensity_is_a_resumable_skip(tmp_path):
+    _manifest_path, _output_root = _case(tmp_path)
+    t1_path = tmp_path / "data" / "sub-001" / "anat" / "sub-001_T1w_preprocessed.nii.gz"
+    constant = sitk.GetImageFromArray(np.ones((8, 8, 8), dtype=np.float32))
+    constant.SetSpacing((1.0, 1.0, 1.0))
+    sitk.WriteImage(constant, str(t1_path))
+    manifest_path = write_manifest_outputs(
+        build_manifest_preview(load_project_config(tmp_path / "project.yaml"))
+    ).manifest_path
+
+    result = run_whole(
+        load_whole_plan(manifest_path),
+        _test_protocol(),
+        extractor_factory=_factory,
+        software=FAKE_SOFTWARE,
+    )
+
+    assert (result.succeeded, result.skipped, result.failed) == (2, 2, 0)
+    skipped = [unit for unit in result.units if unit.status == "skipped"]
+    assert {unit.row["modality"] for unit in skipped} == {"T1"}
+    assert all(
+        json.loads(unit.completion_path.read_text(encoding="utf-8"))["skip_code"]
+        == "whole_intensity_range"
+        for unit in skipped
+    )
+
+
 def test_failed_units_remain_in_cohort_table_with_error_text(tmp_path):
     manifest_path, _output_root = _case(tmp_path)
 
@@ -341,3 +475,52 @@ def test_version_mismatch_fails_by_default_and_can_be_stamped(tmp_path):
     assert result.reference_deviations == (
         "numpy is 9.9; protocol expects 1.26.4",
     )
+
+
+def test_whole_summary_writes_feature_eda_and_archives_prior_reports(tmp_path):
+    manifest_path, _output_root = _case(tmp_path)
+    run = run_whole(
+        load_whole_plan(manifest_path),
+        _test_protocol(),
+        extractor_factory=_factory,
+        software=FAKE_SOFTWARE,
+    )
+    assert run.valid
+
+    summary = summarize_whole(manifest_path, top_features=2)
+    assert (summary.total_units, summary.successful_units) == (4, 4)
+    assert (summary.skipped_units, summary.failed_units) == (0, 0)
+    assert summary.feature_count == 2
+    assert summary.markdown_path.is_file()
+    assert len(_rows(summary.features_path)) == 4
+    report = json.loads(summary.json_path.read_text(encoding="utf-8"))
+    assert all(report["validations"].values())
+    assert report["top_missing_features"] == []
+    assert "No missing or non-finite feature values" in summary.markdown_path.read_text(
+        encoding="utf-8"
+    )
+
+    repeated = summarize_whole(manifest_path, top_features=2)
+    assert len(repeated.backups) == 6
+    assert all(path.is_file() for path in repeated.backups)
+
+
+def test_whole_summary_counts_expected_skips(tmp_path):
+    _manifest_path, _output_root = _case(tmp_path)
+    small_mask = tmp_path / "data" / "sub-001" / "lesions" / "lesion_002.nii.gz"
+    _write_mask(small_mask, np.s_[6:7, 1:4, 1:4])
+    manifest_path = write_manifest_outputs(
+        build_manifest_preview(load_project_config(tmp_path / "project.yaml"))
+    ).manifest_path
+    run = run_whole(
+        load_whole_plan(manifest_path),
+        _test_protocol(),
+        extractor_factory=_factory,
+        software=FAKE_SOFTWARE,
+    )
+    assert run.skipped == 2
+
+    summary = summarize_whole(manifest_path)
+    assert (summary.successful_units, summary.skipped_units) == (2, 2)
+    report = json.loads(summary.json_path.read_text(encoding="utf-8"))
+    assert all(report["validations"].values())

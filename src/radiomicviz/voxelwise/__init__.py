@@ -8,13 +8,21 @@ from radiomicviz.voxelwise.plan import (
     VoxelwiseUnit,
     load_voxelwise_plan,
 )
+from radiomicviz.voxelwise.summary import (
+    VoxelwiseSummaryError,
+    VoxelwiseSummaryResult,
+    summarize_voxelwise,
+)
 
 __all__ = [
     "VoxelwisePlan",
     "VoxelwisePlanError",
     "VoxelwiseRunResult",
     "VoxelwiseStageError",
+    "VoxelwiseSummaryError",
+    "VoxelwiseSummaryResult",
     "VoxelwiseUnit",
     "load_voxelwise_plan",
     "run_voxelwise",
+    "summarize_voxelwise",
 ]

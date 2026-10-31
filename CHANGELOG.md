@@ -8,6 +8,40 @@ This version starts a ground-up rewrite. It is not compatible with the 0.1 serie
 
 ### Added
 
+- `radiomicviz view`, a read-only browser dashboard (optional `viewer` extra: Flask) with
+  a vendored NiiVue 0.69.0 bundle. It shows images, masks, voxelwise maps, habitat masks,
+  feature tables, cohort context, QC and provenance for any partial or complete output
+  tree, binds to localhost with a secret launch token, and never writes to the data or output
+  folders.
+- `radiomicviz habitat-features`, reproducing the reference final analysis step with the
+  unchanged whole-ROI preset on every non-empty fixed, adaptive and geometric habitat
+  label for T1 and FLAIR. The stage uses authenticated full-source-grid masks, retains
+  expected small-zone skips, resumes by region/method/modality, and writes a normalized
+  cohort table plus six reference-schema method-by-modality tables.
+- `radiomicviz habitat-features --summarize` for report-only cohort, status, voxel-count,
+  feature-completeness and subject/session summaries.
+- Expected final-stage handling for habitat zones below the ROI minimum or spanning fewer
+  than two dimensions. These zones are still attempted; a PyRadiomics rejection retains
+  the row and warning without failing the complete run.
+- Independent NIfTI integrity and finite-value validation with SHA-256 input/output
+  fingerprints. Truncated images, NaN/Inf intensities and vector inputs now stop at the
+  manifest with concise diagnostics instead of reaching extraction.
+- Resumable QC skips for one-dimensional regions and constant/non-finite ROI intensity
+  ranges, plus full-source-grid companion masks for every habitat labeling.
+- Small process-pool tasks and dead-worker recovery for whole and voxelwise extraction;
+  completed units are preserved and invocation reports are still written after a worker
+  exits unexpectedly.
+
+- `radiomicviz whole --summarize` and `radiomicviz voxelwise --summarize` for derived,
+  report-only exploratory analysis. Whole-region reports include per-modality descriptive
+  statistics and missingness for every scalar feature; voxelwise reports include finite-map
+  coverage from authenticated completion records. Both produce Markdown, JSON and CSV
+  outputs without rerunning extraction or modifying radiomics results.
+- `radiomicviz habitats --summarize` for report-only exploratory analysis of completed
+  habitat runs. It writes Markdown, JSON and CSV summaries of cohort coverage, method
+  status, adaptive k choices, habitat/cluster-size distributions, subject/session
+  coverage and selected-feature frequencies without rerunning clustering or modifying
+  habitat masks.
 - Reference habitat clustering from paired T1 and FLAIR voxelwise maps. The package
   preserves the validated lesion-local median/IQR representation, joint Spearman
   redundancy filtering, modality block weighting, fixed k=2 primary analysis, adaptive
@@ -30,7 +64,8 @@ This version starts a ground-up rewrite. It is not compatible with the 0.1 serie
 - Targeted handling of the known PyRadiomics voxelwise
   `original_glcm_JointAverage` all-nonfinite result: the map is retained with a concise QC
   warning instead of discarding the other 91 valid maps. New completion records include
-  per-map finite-voxel counts while existing valid records remain resumable.
+  per-map finite-voxel counts. Completion records from before output fingerprints were
+  introduced must be recomputed once with `--force`.
 - Exact-message logging filters for the expected PyRadiomics fixed-bin-count advisory and
   symmetric-GLCM redundancy advisory. All other PyRadiomics and Python warnings remain
   visible.
@@ -45,7 +80,7 @@ This version starts a ground-up rewrite. It is not compatible with the 0.1 serie
   given, and then renames the existing file to `<name>.bak-<timestamp>` first.
 - Strict loader `radiomicviz.config.load_project_config`. It rejects unknown keys,
   missing keys, wrong
-  types, duplicate keys and inconsistent settings, and report every problem with its
+  types, duplicate keys and inconsistent settings, and reports every problem with its
   dotted key path.
 - Deterministic discovery of subjects, sessions, modalities and separate binary region
   masks from `project.yaml`.
@@ -65,9 +100,9 @@ This version starts a ground-up rewrite. It is not compatible with the 0.1 serie
 - A direct-input contract: users supply final, co-registered images and masks. Image
   preparation is intentionally outside the package; only transformations configured in
   the PyRadiomics parameter preset occur during feature extraction.
-- A README quick start from `project init` through manifest creation and whole-region
-  extraction.
-- Progress messages on stderr for `lesions materialize`, `manifest` and `whole`: one
+- A concise README quick start from `project init` through habitat-zone radiomics and
+  summaries, plus a separate methods and output-schema reference.
+- Progress messages on stderr for every compute stage: one
   start line, then one line per subject/session. Stdout summaries are unchanged; the
   library entry points accept an optional `progress` callback.
 - A manual, step-by-step conda installation procedure in the README and, in

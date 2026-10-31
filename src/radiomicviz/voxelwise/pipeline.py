@@ -8,6 +8,7 @@ import os
 import platform
 from collections import Counter, OrderedDict
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
+from concurrent.futures.process import BrokenProcessPool
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -18,7 +19,10 @@ import numpy as np
 import SimpleITK as sitk
 
 from radiomicviz import __version__
+from radiomicviz._platform import platform_identifier, reference_platform_deviation
+from radiomicviz._integrity import file_fingerprint, fingerprint_matches
 from radiomicviz._pyradiomics_logging import install_pyradiomics_advisory_filters
+from radiomicviz._roi import inspect_roi
 from radiomicviz.protocols import Protocol, VoxelwisePreset
 from radiomicviz.voxelwise.models import (
     VoxelwiseCheck,
@@ -64,11 +68,20 @@ class _ProcessedUnit:
 @dataclass(frozen=True)
 class _DefaultExtractionTask:
     unit: VoxelwiseUnit
-    plan: VoxelwisePlan
+    plan: _ExtractionPlan
     protocol: Protocol
     preset: VoxelwisePreset
     software: Mapping[str, str]
     force: bool
+
+
+@dataclass(frozen=True)
+class _ExtractionPlan:
+    """Only the run context one worker needs; never contains the cohort plan."""
+
+    output_root: Path
+    manifest_sha256: str
+    manifest_reference_status: str
 
 
 class _SessionProgress:
@@ -131,9 +144,13 @@ def run_voxelwise(
     """
     if jobs < 1:
         raise VoxelwiseStageError("jobs must be at least 1")
+    if os.name == "nt" and jobs > 61:
+        raise VoxelwiseStageError("jobs cannot exceed 61 on Windows")
     preset = protocol.voxelwise_preset(variant)
     actual_software = dict(software or _software_versions())
     deviations = list(_version_deviations(protocol.expected_software, actual_software))
+    if platform_issue := reference_platform_deviation(actual_software):
+        deviations.append(platform_issue)
     if plan.manifest_reference_status != "reference-compatible":
         deviations.append(
             f"manifest reference status is {plan.manifest_reference_status}"
@@ -142,7 +159,7 @@ def run_voxelwise(
         listing = "\n".join(f"  - {item}" for item in deviations)
         raise VoxelwiseStageError(
             "software or input state does not match the reference protocol:\n"
-            f"{listing}\nUse --allow-version-mismatch only for an explicitly non-reference run."
+            f"{listing}\nUse --allow-nonreference only for an explicitly non-reference run."
         )
 
     started = _utc_now()
@@ -174,6 +191,9 @@ def run_voxelwise(
         )
 
     targets = prepare_voxelwise_report_targets(plan.output_root, variant)
+    extraction_plan = _ExtractionPlan(
+        plan.output_root, plan.manifest_sha256, plan.manifest_reference_status
+    )
     factory = extractor_factory or _default_extractor_factory
     tasks = list(zip(plan.units, planned))
     track = _SessionProgress(plan.units, progress)
@@ -191,7 +211,7 @@ def run_voxelwise(
             return _blocked_unit(unit, preview.output_dir, variant)
         return _extract_unit(
             unit,
-            plan,
+            extraction_plan,
             protocol,
             preset,
             actual_software,
@@ -217,7 +237,7 @@ def run_voxelwise(
                 pending.append(
                     _DefaultExtractionTask(
                         unit=unit,
-                        plan=plan,
+                        plan=extraction_plan,
                         protocol=protocol,
                         preset=preset,
                         software=actual_software,
@@ -225,9 +245,19 @@ def run_voxelwise(
                     )
                 )
         if pending:
-            with ProcessPoolExecutor(max_workers=jobs) as pool:
+            pool = ProcessPoolExecutor(max_workers=jobs)
+            broken: BrokenProcessPool | None = None
+            try:
                 for item in pool.map(_run_default_extraction_task, pending):
                     completed[item.result.unit_key] = track(item)
+            except BrokenProcessPool as exc:
+                broken = exc
+                for task in pending:
+                    if task.unit.unit_key not in completed:
+                        item = _worker_failure(task.unit, task.plan.output_root, preset.variant, exc)
+                        completed[task.unit.unit_key] = track(item)
+            finally:
+                pool.shutdown(wait=broken is None, cancel_futures=True)
         processed = [completed[unit.unit_key] for unit, _preview in tasks]
     else:
         with ThreadPoolExecutor(
@@ -303,7 +333,7 @@ def _plan_unit(
 
 def _extract_unit(
     unit: VoxelwiseUnit,
-    plan: VoxelwisePlan,
+    plan: _ExtractionPlan,
     protocol: Protocol,
     preset: VoxelwisePreset,
     software: Mapping[str, str],
@@ -326,7 +356,8 @@ def _extract_unit(
     checks: list[VoxelwiseCheck] = []
     log = [f"[{unit.unit_key}] extraction started"]
     try:
-        mask_voxels = _mask_voxel_count(unit)
+        inspection = inspect_roi(unit.image_path, unit.mask_path, unit.label)
+        mask_voxels = inspection.voxel_count
         if mask_voxels <= preset.minimum_roi_size:
             return _commit_skip(
                 unit,
@@ -341,6 +372,41 @@ def _extract_unit(
                 mask_voxels,
                 checks,
                 log,
+                reason=(
+                    f"region has {mask_voxels} voxels; PyRadiomics voxelwise extraction "
+                    f"requires strictly more than minimumROISize={preset.minimum_roi_size}"
+                ),
+                check_id="voxelwise_minimum_roi_size",
+                measured=str(mask_voxels),
+                threshold=f">{preset.minimum_roi_size}",
+            )
+        if inspection.dimensions < 2:
+            return _commit_skip(
+                unit, plan, protocol, preset, software, final_dir, work_dir,
+                archived, started, mask_voxels, checks, log,
+                reason=(
+                    f"region spans {inspection.dimensions} dimension; PyRadiomics requires at least 2"
+                ),
+                check_id="voxelwise_minimum_roi_dimensions",
+                measured=str(inspection.dimensions), threshold=">=2",
+            )
+        if (
+            not inspection.finite_intensities
+            or inspection.intensity_min is None
+            or inspection.intensity_max is None
+            or inspection.intensity_min == inspection.intensity_max
+        ):
+            measured_range = (
+                "non-finite"
+                if not inspection.finite_intensities
+                else f"[{inspection.intensity_min}, {inspection.intensity_max}]"
+            )
+            return _commit_skip(
+                unit, plan, protocol, preset, software, final_dir, work_dir,
+                archived, started, mask_voxels, checks, log,
+                reason="region intensity range is non-finite or constant",
+                check_id="voxelwise_intensity_range",
+                measured=measured_range, threshold="finite range with maximum > minimum",
             )
 
         extractor = factory(preset.parameter_path)
@@ -470,13 +536,18 @@ def _extract_unit(
                 modality=unit.modality,
                 path=str(unit.mask_path),
             ),
-            log_lines=tuple(log + [f"[{unit.unit_key}] staging retained at {work_dir}"]),
+            log_lines=tuple(log + [f"[{unit.unit_key}] failed staging removed"]),
         )
+    finally:
+        if work_dir.exists() and work_dir != final_dir:
+            import shutil
+
+            shutil.rmtree(work_dir, ignore_errors=True)
 
 
 def _commit_skip(
     unit: VoxelwiseUnit,
-    plan: VoxelwisePlan,
+    plan: _ExtractionPlan,
     protocol: Protocol,
     preset: VoxelwisePreset,
     software: Mapping[str, str],
@@ -487,18 +558,18 @@ def _commit_skip(
     mask_voxels: int,
     checks: list[VoxelwiseCheck],
     log: list[str],
+    reason: str,
+    check_id: str,
+    measured: str,
+    threshold: str,
 ) -> _ProcessedUnit:
-    reason = (
-        f"region has {mask_voxels} voxels; PyRadiomics voxelwise extraction "
-        f"requires strictly more than minimumROISize={preset.minimum_roi_size}"
-    )
     checks.append(
         _check(
             unit,
-            "voxelwise_minimum_roi_size",
+            check_id,
             "WARN",
-            measured=str(mask_voxels),
-            threshold=f">{preset.minimum_roi_size}",
+            measured=measured,
+            threshold=threshold,
             message=reason,
             path=unit.mask_path,
         )
@@ -518,6 +589,7 @@ def _commit_skip(
     completion.update(
         {
             "skip_reason": reason,
+            "skip_code": check_id,
             "map_count": 0,
             "map_names": [],
             "map_schema_sha256": preset.expected_map_schema_sha256,
@@ -639,6 +711,37 @@ def _blocked_unit(
             path=str(output_dir),
         ),
         log_lines=(f"[{unit.unit_key}] blocked: {message}",),
+    )
+
+
+def _worker_failure(
+    unit: VoxelwiseUnit, output_root: Path, variant: str, exc: BaseException
+) -> _ProcessedUnit:
+    message = (
+        "a process-pool worker exited unexpectedly; completed units were preserved "
+        f"({type(exc).__name__}: {exc})"
+    )
+    output_dir = _output_dir(unit, output_root, variant)
+    return _ProcessedUnit(
+        result=VoxelwiseUnitResult(
+            unit_key=unit.unit_key,
+            status="failed",
+            output_dir=output_dir,
+            completion_path=None,
+            message=message,
+        ),
+        checks=(),
+        failure=VoxelwiseFailure(
+            error_code="voxelwise_worker_lost",
+            message=message,
+            unit_key=unit.unit_key,
+            subject_id=unit.subject_id,
+            session_id=unit.session_id,
+            region_id=unit.region_id,
+            modality=unit.modality,
+            path=str(output_dir),
+        ),
+        log_lines=(f"[{unit.unit_key}] failed: {message}",),
     )
 
 
@@ -779,18 +882,27 @@ def _completion_matches(
         "protocol_sha256": protocol.sha256,
         "preset_sha256": preset.parameter_sha256,
         "software": dict(software),
-        "input_image": _fingerprint(unit.image_path),
-        "input_mask": _fingerprint(unit.mask_path),
         "label": unit.label,
         "map_schema_sha256": preset.expected_map_schema_sha256,
     }
     if any(data.get(key) != value for key, value in expected.items()):
         return False
+    if not fingerprint_matches(
+        data.get("input_image"), unit.image_path, expected_sha256=unit.image_sha256
+    ) or not fingerprint_matches(
+        data.get("input_mask"), unit.mask_path, expected_sha256=unit.mask_sha256
+    ):
+        return False
+    try:
+        if data.get("mask_voxels") != _mask_voxel_count(unit):
+            return False
+    except (OSError, RuntimeError, VoxelwiseStageError):
+        return False
     status = data.get("status")
     if status == "skipped":
         return (
             isinstance(data.get("mask_voxels"), int)
-            and data["mask_voxels"] <= preset.minimum_roi_size
+            and data["mask_voxels"] >= 1
             and data.get("map_count") == 0
             and data.get("map_names") == []
             and data.get("outputs") == {}
@@ -807,14 +919,14 @@ def _completion_matches(
         return False
     for name in preset.expected_map_names:
         map_path = path.parent / f"{name}.nrrd"
-        if not map_path.is_file() or outputs.get(name) != _fingerprint(map_path):
+        if not fingerprint_matches(outputs.get(name), map_path):
             return False
     return True
 
 
 def _completion_base(
     unit: VoxelwiseUnit,
-    plan: VoxelwisePlan,
+    plan: _ExtractionPlan,
     protocol: Protocol,
     preset: VoxelwisePreset,
     software: Mapping[str, str],
@@ -826,7 +938,7 @@ def _completion_base(
     archived: Path | None,
 ) -> dict[str, object]:
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "stage": "voxelwise",
         "status": status,
         "unit_key": unit.unit_key,
@@ -839,8 +951,9 @@ def _completion_base(
         "preset_id": preset.preset_id,
         "preset_sha256": preset.parameter_sha256,
         "software": dict(software),
-        "input_image": _fingerprint(unit.image_path),
-        "input_mask": _fingerprint(unit.mask_path),
+        "reference_status": _reference_status(plan, protocol, software),
+        "input_image": _fingerprint(unit.image_path, sha256=unit.image_sha256),
+        "input_mask": _fingerprint(unit.mask_path, sha256=unit.mask_sha256),
         "label": unit.label,
         "mask_voxels": mask_voxels,
         "minimum_roi_size": preset.minimum_roi_size,
@@ -872,6 +985,7 @@ def _software_versions() -> dict[str, str]:
             f"voxelwise extraction dependency is missing: {exc.name}"
         ) from exc
     return {
+        "platform": platform_identifier(),
         "python": platform.python_version(),
         "pyradiomics": str(radiomics.__version__).lstrip("v"),
         "numpy": np.__version__,
@@ -934,13 +1048,24 @@ def _archive_directory(path: Path) -> Path:
     return candidate
 
 
-def _fingerprint(path: Path, *, recorded_path: Path | None = None) -> dict[str, object]:
-    stat = path.stat()
-    return {
-        "path": str((recorded_path or path).resolve()),
-        "size_bytes": stat.st_size,
-        "mtime_utc": datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat(),
-    }
+def _fingerprint(
+    path: Path,
+    *,
+    recorded_path: Path | None = None,
+    sha256: str | None = None,
+) -> dict[str, object]:
+    return file_fingerprint(path, recorded_path=recorded_path, sha256=sha256)
+
+
+def _reference_status(
+    plan: _ExtractionPlan, protocol: Protocol, software: Mapping[str, str]
+) -> str:
+    return (
+        "reference-compatible"
+        if plan.manifest_reference_status == "reference-compatible"
+        and not _version_deviations(protocol.expected_software, software)
+        else "non-reference"
+    )
 
 
 def _atomic_text(path: Path, text: str) -> None:

@@ -14,7 +14,12 @@ import yaml
 
 from radiomicviz.config import load_project_config
 from radiomicviz.config.templates import template_text
-from radiomicviz.habitats import HabitatStageError, load_habitat_plan, run_habitats
+from radiomicviz.habitats import (
+    HabitatStageError,
+    load_habitat_plan,
+    run_habitats,
+    summarize_habitats,
+)
 from radiomicviz.habitats.reference import (
     METHOD_ADAPTIVE,
     METHOD_FIXED,
@@ -192,6 +197,10 @@ def test_habitats_run_all_methods_resume_and_write_cohort_tables(tmp_path: Path)
     unit = first.units[0]
     assert unit.qc["representation_status"] == "computed"
     completion = json.loads(unit.completion_path.read_text(encoding="utf-8"))
+    assert completion["reference_status"] == "reference-compatible"
+    source_size = sitk.ReadImage(
+        str(load_habitat_plan(manifest).units[0].mask_path)
+    ).GetSize()
     expected_order = [
         f"{modality}_{name.split('original_', 1)[1]}"
         for modality in ("T1", "FLAIR")
@@ -206,6 +215,12 @@ def test_habitats_run_all_methods_resume_and_write_cohort_tables(tmp_path: Path)
     }.items():
         values = sitk.GetArrayFromImage(sitk.ReadImage(str(path)))
         assert np.count_nonzero(values) == 64, method
+        source_grid = path.with_name("mask_source_grid.nii.gz")
+        assert source_grid.is_file()
+        assert sitk.ReadImage(str(source_grid)).GetSize() == source_size
+        assert np.count_nonzero(
+            sitk.GetArrayFromImage(sitk.ReadImage(str(source_grid)))
+        ) == 64
 
     second = run_habitats(
         load_habitat_plan(manifest), protocol, software=HABITAT_SOFTWARE
@@ -213,6 +228,21 @@ def test_habitats_run_all_methods_resume_and_write_cohort_tables(tmp_path: Path)
     assert second.valid and second.resumed == 1
     assert len(_rows(second.table_path)) == 7
 
+
+def test_habitat_dry_run_blocks_before_missing_voxelwise_inputs(tmp_path: Path) -> None:
+    manifest, _output_root = _case(tmp_path)
+    result = run_habitats(
+        load_habitat_plan(manifest),
+        _protocol(),
+        software=HABITAT_SOFTWARE,
+        dry_run=True,
+    )
+
+    assert not result.valid
+    assert result.blocked == 1
+    assert result.units[0].status == "blocked"
+    assert "run 'radiomicviz voxelwise'" in result.units[0].message
+    assert result.failures[0].error_code == "habitat_voxelwise_input_missing"
 
 def test_habitats_skip_when_both_voxelwise_units_were_too_small(tmp_path: Path) -> None:
     manifest, _output_root = _case(tmp_path, count=10)
@@ -224,7 +254,6 @@ def test_habitats_skip_when_both_voxelwise_units_were_too_small(tmp_path: Path) 
     assert result.valid and result.skipped == 1
     assert _rows(result.table_path) == []
     assert result.warnings == 1
-
 
 def test_habitats_reference_fallback_for_eleven_to_forty_nine_voxels(
     tmp_path: Path,
@@ -302,3 +331,50 @@ def test_upstream_voxelwise_version_deviation_requires_explicit_override(
         allow_version_mismatch=True,
     )
     assert allowed.valid and not allowed.reference_compatible
+
+
+def test_habitat_summary_writes_reports_and_archives_previous_reports(
+    tmp_path: Path,
+) -> None:
+    manifest, _output_root = _case(tmp_path)
+    protocol = _protocol()
+    _prepare_voxelwise(manifest, protocol)
+    run = run_habitats(
+        load_habitat_plan(manifest), protocol, software=HABITAT_SOFTWARE
+    )
+    assert run.valid
+
+    summary = summarize_habitats(manifest, top_features=3)
+    assert summary.total_regions == 1
+    assert summary.completed_regions == 1
+    assert summary.skipped_regions == 0
+    assert summary.failed_units == 0
+    assert summary.source_run_runtime_seconds is not None
+    assert summary.markdown_path.is_file()
+    assert summary.features_path.is_file()
+    report = json.loads(summary.json_path.read_text(encoding="utf-8"))
+    assert report["cohort"]["habitat_index_rows"] == 7
+    assert all(report["validations"].values())
+    assert len(report["top_selected_features"]) <= 3
+
+    repeated = summarize_habitats(manifest, top_features=3)
+    assert len(repeated.backups) == 6
+    assert all(path.is_file() for path in repeated.backups)
+
+
+def test_habitat_summary_supports_an_all_skipped_run(tmp_path: Path) -> None:
+    manifest, _output_root = _case(tmp_path, count=10)
+    protocol = _protocol()
+    _prepare_voxelwise(manifest, protocol)
+    run = run_habitats(
+        load_habitat_plan(manifest), protocol, software=HABITAT_SOFTWARE
+    )
+    assert run.valid and run.skipped == 1
+
+    summary = summarize_habitats(manifest)
+    assert summary.total_regions == 1
+    assert summary.completed_regions == 0
+    assert summary.skipped_regions == 1
+    report = json.loads(summary.json_path.read_text(encoding="utf-8"))
+    assert report["cohort"]["habitat_index_rows"] == 0
+    assert all(report["validations"].values())

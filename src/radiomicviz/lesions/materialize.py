@@ -21,6 +21,7 @@ requires a matching completion record or an explicit ``force`` request.
 from __future__ import annotations
 
 import csv
+import glob
 import hashlib
 import json
 import os
@@ -164,6 +165,14 @@ def build_materialization_plan(
     )
     if not data_root.is_dir():
         raise MaterializationError(f"data_root does not exist or is not a directory: {data_root}")
+    try:
+        resolved_output.relative_to(data_root)
+    except ValueError:
+        pass
+    else:
+        raise MaterializationError(
+            "output_root must be separate from data_root so generated masks cannot be rediscovered as inputs"
+        )
 
     sessions = _discover_sessions(project, data_root)
     if not sessions:
@@ -288,7 +297,7 @@ def materialized_session_root(
         ("session", session_id),
         ("region type", region_type),
     ):
-        if value in {".", ".."} or SAFE_ID_PATTERN.fullmatch(value) is None:
+        if not _safe_identifier(value):
             raise MaterializationError(f"unsafe {kind} identifier: {value!r}")
     return (
         output_root
@@ -775,7 +784,8 @@ def _match_source(
     session: _Session,
 ) -> list[Path]:
     pattern = project.regions.mask_pattern.format(
-        subject=session.subject_name, session=session.session_name
+        subject=glob.escape(session.subject_name),
+        session=glob.escape(session.session_name),
     )
     return _safe_glob(data_root, pattern)
 
@@ -827,7 +837,21 @@ def _extract_id(pattern: str, group: str, name: str) -> str | None:
 
 
 def _safe_identifier(value: str) -> bool:
-    return value not in {".", ".."} and SAFE_ID_PATTERN.fullmatch(value) is not None
+    if (
+        value in {".", ".."}
+        or "__" in value
+        or value.startswith("-")
+        or value.endswith((".", " "))
+        or not value.strip(".")
+        or SAFE_ID_PATTERN.fullmatch(value) is None
+    ):
+        return False
+    stem = value.split(".", 1)[0].casefold()
+    return stem not in {
+        "con", "prn", "aux", "nul",
+        *(f"com{index}" for index in range(1, 10)),
+        *(f"lpt{index}" for index in range(1, 10)),
+    }
 
 
 def _resolve_root(value: str, base: Path) -> Path:

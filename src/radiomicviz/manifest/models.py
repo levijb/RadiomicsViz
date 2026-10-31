@@ -21,8 +21,10 @@ class ManifestRow:
     space_id: str
     image_size_bytes: int
     image_mtime_utc: str
+    image_sha256: str
     mask_size_bytes: int
     mask_mtime_utc: str
+    mask_sha256: str
 
     def to_dict(self) -> dict[str, object]:
         return asdict(self)

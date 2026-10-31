@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 import csv
-import hashlib
 import json
+import re
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from pathlib import Path
 
+from radiomicviz._integrity import sha256_file
 from radiomicviz.config._common import SAFE_ID_PATTERN
 
 _REQUIRED_COLUMNS = {
@@ -22,8 +22,10 @@ _REQUIRED_COLUMNS = {
     "label",
     "image_size_bytes",
     "image_mtime_utc",
+    "image_sha256",
     "mask_size_bytes",
     "mask_mtime_utc",
+    "mask_sha256",
 }
 
 
@@ -45,8 +47,10 @@ class WholeUnit:
     label: int
     image_size_bytes: int
     image_mtime_utc: str
+    image_sha256: str
     mask_size_bytes: int
     mask_mtime_utc: str
+    mask_sha256: str
     metadata: tuple[tuple[str, str], ...]
 
     @property
@@ -117,8 +121,9 @@ def load_whole_plan(path: str | Path) -> WholePlan:
             )
         units[key] = unit
     ordered = tuple(units[key] for key in sorted(units))
+    digest_cache: dict[Path, str] = {}
     for unit in ordered:
-        _verify_unit_inputs(unit)
+        _verify_unit_inputs(unit, digest_cache)
     return WholePlan(
         manifest_path=manifest_path,
         manifest_sha256=manifest_sha256,
@@ -147,12 +152,18 @@ def _parse_unit(
     image_mtime = row.get("image_mtime_utc", "")
     if not image_mtime:
         raise WholePlanError(f"manifest row {row_number}: image_mtime_utc is empty")
+    image_sha256 = _sha256_value(
+        row.get("image_sha256", ""), "image_sha256", row_number
+    )
     mask_size = _positive_integer(
         row.get("mask_size_bytes", ""), "mask_size_bytes", row_number
     )
     mask_mtime = row.get("mask_mtime_utc", "")
     if not mask_mtime:
         raise WholePlanError(f"manifest row {row_number}: mask_mtime_utc is empty")
+    mask_sha256 = _sha256_value(
+        row.get("mask_sha256", ""), "mask_sha256", row_number
+    )
     metadata = tuple((field, row.get(field, "")) for field in meta_fields)
     return WholeUnit(
         subject_id=subject,
@@ -165,24 +176,30 @@ def _parse_unit(
         label=label,
         image_size_bytes=image_size,
         image_mtime_utc=image_mtime,
+        image_sha256=image_sha256,
         mask_size_bytes=mask_size,
         mask_mtime_utc=mask_mtime,
+        mask_sha256=mask_sha256,
         metadata=metadata,
     )
 
 
-def _verify_unit_inputs(unit: WholeUnit) -> None:
+def _verify_unit_inputs(unit: WholeUnit, digest_cache: dict[Path, str]) -> None:
     _verify_fingerprint(
         unit.mask_path,
         unit.mask_size_bytes,
         unit.mask_mtime_utc,
+        unit.mask_sha256,
         f"mask for {unit.unit_key}",
+        digest_cache,
     )
     _verify_fingerprint(
         unit.image_path,
         unit.image_size_bytes,
         unit.image_mtime_utc,
+        unit.image_sha256,
         f"analysis-ready image for {unit.unit_key}",
+        digest_cache,
     )
 
 
@@ -206,27 +223,39 @@ def _verify_manifest_metadata(manifest_path: Path, manifest_hash: str) -> str:
     return status
 
 
-def _verify_fingerprint(path: Path, size: int, mtime: str, description: str) -> None:
+def _verify_fingerprint(
+    path: Path,
+    size: int,
+    mtime: str,
+    sha256: str,
+    description: str,
+    digest_cache: dict[Path, str],
+) -> None:
     if not path.is_file():
         raise WholePlanError(f"{description} is missing: {path}")
-    current = _fingerprint(path)
-    if current["size_bytes"] != size or current["mtime_utc"] != mtime:
+    if path.stat().st_size != size:
         raise WholePlanError(
             f"{description} changed after manifest creation; rebuild the manifest: {path}"
         )
-
-
-def _fingerprint(path: Path) -> dict[str, object]:
-    stat = path.stat()
-    return {
-        "path": str(path.resolve()),
-        "size_bytes": stat.st_size,
-        "mtime_utc": datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat(),
-    }
+    current = digest_cache.get(path)
+    if current is None:
+        current = sha256_file(path)
+        digest_cache[path] = current
+    if current != sha256:
+        raise WholePlanError(
+            f"{description} content changed after manifest creation; rebuild the manifest: {path}"
+        )
 
 
 def _identifier(value: str, name: str, row_number: int) -> str:
-    if value in {"", ".", ".."} or SAFE_ID_PATTERN.fullmatch(value) is None:
+    if (
+        value in {"", ".", ".."}
+        or "__" in value
+        or value.startswith("-")
+        or value.endswith((".", " "))
+        or not value.strip(".")
+        or SAFE_ID_PATTERN.fullmatch(value) is None
+    ):
         raise WholePlanError(
             f"manifest row {row_number}: unsafe or empty {name} {value!r}"
         )
@@ -241,6 +270,10 @@ def _absolute_path(value: str, name: str, row_number: int) -> Path:
 
 
 def _positive_integer(value: str, name: str, row_number: int) -> int:
+    if re.fullmatch(r"[0-9]+", str(value)) is None:
+        raise WholePlanError(
+            f"manifest row {row_number}: {name} must contain decimal digits only"
+        )
     try:
         parsed = int(value)
     except (TypeError, ValueError) as exc:
@@ -254,9 +287,13 @@ def _positive_integer(value: str, name: str, row_number: int) -> int:
     return parsed
 
 
+def _sha256_value(value: str, name: str, row_number: int) -> str:
+    if re.fullmatch(r"[0-9a-f]{64}", value) is None:
+        raise WholePlanError(
+            f"manifest row {row_number}: {name} must be a lowercase SHA-256 digest"
+        )
+    return value
+
+
 def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for block in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(block)
-    return digest.hexdigest()
+    return sha256_file(path)
